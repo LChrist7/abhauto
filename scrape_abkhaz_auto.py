@@ -6,8 +6,9 @@ The bot responds to commands to configure filters (brand, model, mileage,
 year, price, and keywords contained in the listing description) and returns
 matches from the first four pages of the configured category.
 
-Environment variable required:
-    TELEGRAM_BOT_TOKEN - Token obtained from @BotFather.
+Environment variable (optional):
+    TELEGRAM_BOT_TOKEN - Token obtained from @BotFather. If not provided,
+    DEFAULT_BOT_TOKEN below will be used.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 CATEGORY_URL = "https://abkhaz-auto.ru/category/188"
 SEEN_FILE = Path("seen_listings.json")
 PAGE_COUNT = 4  # base page + next 3 pages
+DEFAULT_BOT_TOKEN = "8277337729:AAHgG2z4cet7VGJJlXnn57kbpoXapkj7Mw0"
 
 
 # Logging setup
@@ -246,7 +248,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def run_bot() -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or DEFAULT_BOT_TOKEN
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN не задан")
 
