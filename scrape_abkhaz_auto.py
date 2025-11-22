@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import asyncio
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -25,13 +26,15 @@ import requests
 from bs4 import BeautifulSoup
 import pytz
 
-try:
-    from telegram import Update
-    from telegram.ext import Application, CommandHandler, ContextTypes, Defaults
-except ImportError as exc:  # pragma: no cover - dependency guard
+_telegram_spec = importlib.util.find_spec("telegram")
+_telegram_ext_spec = importlib.util.find_spec("telegram.ext")
+if _telegram_spec is None or _telegram_ext_spec is None:
     raise SystemExit(
         "Требуется установить библиотеку python-telegram-bot (например, `pip install python-telegram-bot>=20`)."
-    ) from exc
+    )
+
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, Defaults
 
 
 # Base configuration
