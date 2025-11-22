@@ -38,7 +38,7 @@ if _telegram_spec is None or _telegram_ext_spec is None:
     )
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 
 # Base configuration
@@ -275,14 +275,7 @@ def run_bot() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    job_queue = JobQueue()
-
-    application = (
-        Application.builder()
-        .token(token)
-        .job_queue(job_queue)
-        .build()
-    )
+    application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("filters", set_filters))
     application.add_handler(CommandHandler("search", search))
