@@ -25,6 +25,11 @@ from typing import Iterable, List, Optional
 import requests
 from bs4 import BeautifulSoup
 
+# APScheduler (используется внутри JobQueue) ожидает pytz-таймзону. Эта
+# переменная окружения заставляет tzlocal возвращать pytz-объект, даже если
+# система настроена на zoneinfo, до импорта JobQueue.
+os.environ.setdefault("TZLOCAL_USE_DEPRECATED_PYTZ", "1")
+
 _telegram_spec = importlib.util.find_spec("telegram")
 _telegram_ext_spec = importlib.util.find_spec("telegram.ext")
 if _telegram_spec is None or _telegram_ext_spec is None:
@@ -270,10 +275,6 @@ def run_bot() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    # Принудительно просим tzlocal вернуть pytz-таймзону, иначе APScheduler
-    # внутри JobQueue может поднять ошибку "Only timezones from the pytz
-    # library are supported" при инициализации планировщика.
-    os.environ.setdefault("TZLOCAL_USE_DEPRECATED_PYTZ", "1")
     job_queue = JobQueue()
 
     application = (
