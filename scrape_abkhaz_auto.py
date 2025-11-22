@@ -271,6 +271,9 @@ def run_bot() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+    # APScheduler внутри python-telegram-bot ожидает tzinfo из pytz.
+    # Без явной конфигурации (например, если оставить системную zoneinfo),
+    # планировщик падает с TypeError: "Only timezones from the pytz library are supported".
     job_queue = JobQueue()
     job_queue.scheduler.configure(timezone=pytz.UTC)
 
