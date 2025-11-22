@@ -24,7 +24,6 @@ from typing import Iterable, List, Optional
 
 import requests
 from bs4 import BeautifulSoup
-import pytz
 
 _telegram_spec = importlib.util.find_spec("telegram")
 _telegram_ext_spec = importlib.util.find_spec("telegram.ext")
@@ -34,7 +33,7 @@ if _telegram_spec is None or _telegram_ext_spec is None:
     )
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, Defaults, JobQueue
+from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
 
 
 # Base configuration
@@ -271,17 +270,11 @@ def run_bot() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    # APScheduler внутри python-telegram-bot ожидает tzinfo из pytz.
-    # Без явной конфигурации (например, если оставить системную zoneinfo),
-    # планировщик падает с TypeError: "Only timezones from the pytz library are supported".
     job_queue = JobQueue()
-    job_queue.scheduler.configure(timezone=pytz.UTC)
 
     application = (
         Application.builder()
         .token(token)
-        .timezone(pytz.UTC)
-        .defaults(Defaults(tzinfo=pytz.UTC))
         .job_queue(job_queue)
         .build()
     )
