@@ -25,6 +25,7 @@ from typing import Iterable, List, Optional
 import requests
 from bs4 import BeautifulSoup
 import pytz
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 _telegram_spec = importlib.util.find_spec("telegram")
 _telegram_ext_spec = importlib.util.find_spec("telegram.ext")
@@ -271,7 +272,7 @@ def run_bot() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    job_queue = JobQueue(tzinfo=pytz.UTC)
+    job_queue = JobQueue(scheduler=AsyncIOScheduler(timezone=pytz.UTC))
 
     application = (
         Application.builder()
