@@ -13,9 +13,15 @@ Environment variable (optional):
 
 from __future__ import annotations
 
+import os
+
+# APScheduler (используется внутри JobQueue) ожидает pytz-таймзону. Эта
+# переменная окружения должна быть установлена максимально рано, чтобы tzlocal
+# возвращал pytz-объект даже при конфигурации zoneinfo.
+os.environ.setdefault("TZLOCAL_USE_DEPRECATED_PYTZ", "1")
+
 import json
 import logging
-import os
 import asyncio
 import importlib.util
 from dataclasses import dataclass, field
@@ -24,11 +30,6 @@ from typing import Iterable, List, Optional
 
 import requests
 from bs4 import BeautifulSoup
-
-# APScheduler (используется внутри JobQueue) ожидает pytz-таймзону. Эта
-# переменная окружения заставляет tzlocal возвращать pytz-объект, даже если
-# система настроена на zoneinfo, до импорта JobQueue.
-os.environ.setdefault("TZLOCAL_USE_DEPRECATED_PYTZ", "1")
 
 _telegram_spec = importlib.util.find_spec("telegram")
 _telegram_ext_spec = importlib.util.find_spec("telegram.ext")
