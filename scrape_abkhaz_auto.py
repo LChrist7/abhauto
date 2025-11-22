@@ -24,6 +24,7 @@ from typing import Iterable, List, Optional
 
 import requests
 from bs4 import BeautifulSoup
+import pytz
 
 _telegram_spec = importlib.util.find_spec("telegram")
 _telegram_ext_spec = importlib.util.find_spec("telegram.ext")
@@ -270,7 +271,9 @@ def run_bot() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    job_queue = JobQueue()
+    # Явно задаём pytz-таймзону, иначе APScheduler внутри JobQueue может
+    # поднять ошибку "Only timezones from the pytz library are supported".
+    job_queue = JobQueue(timezone=pytz.UTC)
 
     application = (
         Application.builder()
