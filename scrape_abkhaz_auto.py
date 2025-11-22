@@ -22,8 +22,14 @@ from typing import Iterable, List, Optional
 
 import requests
 from bs4 import BeautifulSoup
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+
+try:
+    from telegram import Update
+    from telegram.ext import Application, CommandHandler, ContextTypes
+except ImportError as exc:  # pragma: no cover - dependency guard
+    raise SystemExit(
+        "Требуется установить библиотеку python-telegram-bot (например, `pip install python-telegram-bot>=20`)."
+    ) from exc
 
 
 # Base configuration
