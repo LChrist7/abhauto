@@ -185,6 +185,75 @@ def build_page_url(page: int) -> str:
     return CATEGORY_URL if page <= 1 else f"{CATEGORY_URL}?page={page}"
 
 
+def _parse_listing_item(item) -> Optional[dict]:
+    """Извлекает данные объявления прямо со страницы списка.
+
+    На абхаз-авто объявления отображаются в блоках вида:
+    <li id="box_nc_...">
+      <div class="allad_h">Toyota Crown</div>
+      <p>2007 г., пробег: 1 км...</p>
+      <div class="allad_info">...</div>
+    </li>
+    Функция пытается собрать марку, модель, год, пробег, цену и краткое
+    описание без перехода на детальную страницу.
+    """
+
+    link = item.select_one("a[href]")
+    title_el = item.select_one(".catalog__title") or item.select_one(".allad_h") or link
+    if not link or not title_el:
+        return None
+
+    href = link.get("href") or ""
+    listing_id = href.rstrip("/").split("/")[-1]
+    title = title_el.get_text(strip=True)
+
+    def parse_price(text: str) -> Optional[int]:
+        digits = "".join(ch for ch in text if ch.isdigit())
+        return int(digits) if digits else None
+
+    price_el = item.select_one(".catalog__price")
+    year_el = item.select_one(".catalog__year")
+    description_el = item.select_one(".catalog__description, .description, .allad_info")
+    info_text = " ".join(item.select_one("p").stripped_strings) if item.select_one("p") else ""
+    block_text = " ".join(item.stripped_strings)
+
+    price_text = price_el.get_text(" ", strip=True) if price_el else info_text or block_text
+    price = parse_price(price_text)
+
+    year_text = year_el.get_text(strip=True) if year_el else ""
+    if not year_text:
+        year_match = re.search(r"\b(19|20)\d{2}\b", info_text or block_text)
+        year_text = year_match.group(0) if year_match else ""
+    year = int(year_text[:4]) if year_text[:4].isdigit() else None
+
+    mileage_text = _extract_mileage_raw(info_text or block_text)
+    mileage = _parse_int(mileage_text)
+
+    description = description_el.get_text(" ", strip=True) if description_el else ""
+    if not description:
+        description = info_text
+
+    brand = None
+    model = None
+    if title:
+        parts = title.split(maxsplit=1)
+        brand = parts[0]
+        if len(parts) > 1:
+            model = parts[1]
+
+    return {
+        "id": listing_id,
+        "title": title,
+        "url": href if href.startswith("http") else f"https://abkhaz-auto.ru{href}",
+        "price": price,
+        "year": year,
+        "mileage": mileage,
+        "description": description,
+        "brand": brand,
+        "model": model,
+    }
+
+
 def fetch_listings() -> list[dict]:
     listings: list[dict] = []
     for page in range(1, PAGE_COUNT + 1):
@@ -193,29 +262,17 @@ def fetch_listings() -> list[dict]:
         resp = requests.get(url, timeout=20)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
-        for item in soup.select(".catalog__item"):
-            link = item.select_one("a")
-            title_el = item.select_one(".catalog__title")
-            price_el = item.select_one(".catalog__price")
-            year_el = item.select_one(".catalog__year")
-            if not link or not title_el:
-                continue
-            href = link.get("href") or ""
-            listing_id = href.rstrip("/").split("/")[-1]
-            title = title_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(" ", "") if price_el else ""
-            year_text = year_el.get_text(strip=True) if year_el else ""
-            price = int("".join(ch for ch in price_text if ch.isdigit())) if any(ch.isdigit() for ch in price_text) else None
-            year = int(year_text[:4]) if year_text[:4].isdigit() else None
-            listings.append(
-                {
-                    "id": listing_id,
-                    "title": title,
-                    "url": href if href.startswith("http") else f"https://abkhaz-auto.ru{href}",
-                    "price": price,
-                    "year": year,
-                }
-            )
+        # Поддержка старых и новых версток каталога.
+        item_selectors = [".catalog__item", "li[id^='box_']", ".allad"]
+        for selector in item_selectors:
+            for item in soup.select(selector):
+                parsed = _parse_listing_item(item)
+                if parsed:
+                    listings.append(parsed)
+            if listings:
+                # Если уже нашли объявления по одному из селекторов, не продолжаем
+                # перебирать остальные (чтобы избежать дубликатов).
+                break
     return listings
 
 
@@ -378,34 +435,37 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     title_lower = title.lower()
     title_normalized = _normalize_for_match(title)
 
-    description = ""
-    description_normalized = ""
-    mileage: Optional[int] = None
-    detail_brand: Optional[str] = None
-    detail_model: Optional[str] = None
-    detail_year: Optional[int] = None
+    description = card.get("description", "") or ""
+    description_normalized = _normalize_for_match(description) if description else ""
+    mileage: Optional[int] = card.get("mileage")
+    detail_brand: Optional[str] = card.get("brand")
+    detail_model: Optional[str] = card.get("model")
+    detail_year: Optional[int] = card.get("year")
+    fetched_details = False
 
-    def ensure_details() -> None:
-        nonlocal description, mileage, description_normalized, detail_brand, detail_model, detail_year
-        if description or mileage is not None or detail_brand is not None or detail_model is not None:
+    def ensure_details(force: bool = False) -> None:
+        nonlocal description, mileage, description_normalized, detail_brand, detail_model, detail_year, fetched_details
+        if fetched_details:
+            return
+        already_have_core = description or mileage is not None or detail_brand is not None or detail_model is not None or detail_year is not None
+        if not force and already_have_core:
             return
         try:
             details = parse_detail_page(card.get("url", ""))
-            mileage = details.get("mileage")
-            description = details.get("description") or ""
-            detail_brand = details.get("brand")
-            detail_model = details.get("model")
-            detail_year = details.get("year")
-            description_normalized = _normalize_for_match(description)
+            mileage = details.get("mileage", mileage)
+            description = details.get("description") or description
+            detail_brand = details.get("brand") or detail_brand
+            detail_model = details.get("model") or detail_model
+            detail_year = details.get("year") if details.get("year") is not None else detail_year
+            description_normalized = _normalize_for_match(description) if description else description_normalized
+            fetched_details = True
         except Exception as exc:  # pragma: no cover - сетевые ошибки
             LOGGER.warning(
                 "Не удалось загрузить детали объявления %s: %s",
                 card.get("url"),
                 exc,
             )
-            description = ""
-            description_normalized = ""
-            mileage = None
+            fetched_details = True
 
     if filters.brand:
         brand_lower = filters.brand.lower()
@@ -420,7 +480,19 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             and brand_lower not in description.lower()
             and brand_normalized not in description_normalized
         ):
-            return False
+            ensure_details(force=True)
+            detail_brand_text = detail_brand or detail_brand_text
+            if description and not description_normalized:
+                description_normalized = _normalize_for_match(description)
+            if (
+                brand_lower not in title_lower
+                and brand_normalized not in title_normalized
+                and brand_lower not in (detail_brand_text or "").lower()
+                and brand_normalized not in _normalize_for_match(detail_brand_text or "")
+                and brand_lower not in description.lower()
+                and brand_normalized not in (description_normalized or "")
+            ):
+                return False
 
     if filters.model:
         model_lower = filters.model.lower()
@@ -435,23 +507,39 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             and model_lower not in description.lower()
             and model_normalized not in description_normalized
         ):
-            return False
+            ensure_details(force=True)
+            detail_model_text = detail_model or detail_model_text
+            if description and not description_normalized:
+                description_normalized = _normalize_for_match(description)
+            if (
+                model_lower not in title_lower
+                and model_normalized not in title_normalized
+                and model_lower not in (detail_model_text or "").lower()
+                and model_normalized not in _normalize_for_match(detail_model_text or "")
+                and model_lower not in description.lower()
+                and model_normalized not in (description_normalized or "")
+            ):
+                return False
 
     if filters.max_price is not None and card.get("price") is not None and card["price"] > filters.max_price:
         return False
     if filters.min_year is not None:
-        ensure_details()
         effective_year = detail_year if detail_year is not None else card.get("year")
+        if effective_year is None:
+            ensure_details(force=True)
+            effective_year = detail_year if detail_year is not None else card.get("year")
         if effective_year is not None and effective_year < filters.min_year:
             return False
 
     if filters.max_mileage is not None:
-        ensure_details()
+        if mileage is None:
+            ensure_details(force=True)
         if mileage is not None and mileage > filters.max_mileage:
             return False
 
     if filters.description_keywords:
-        ensure_details()
+        if not description:
+            ensure_details(force=True)
         desc_lower = description.lower()
         desc_normalized = description_normalized or _normalize_for_match(description)
         for keyword in filters.description_keywords:
