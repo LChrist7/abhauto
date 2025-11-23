@@ -296,6 +296,8 @@ def _parse_listing_item(item) -> Optional[dict]:
     def parse_price(text: str) -> Optional[int]:
         # Цена на странице обычно обёрнута в catalog__price. Если блок не найден,
         # пробуем вытащить число рядом со словами «руб»/«₽» или «цена».
+        # Значения, похожие на год (4 цифры) или слишком маленькие суммы отбрасываем,
+        # чтобы не путать стоимость с годом выпуска.
         patterns = [
             r"(?:цена[:\s]*)?([\d\s]{3,})(?=\s*(?:руб|₽|$))",
             r"([\d\s]{3,})",
@@ -306,7 +308,11 @@ def _parse_listing_item(item) -> Optional[dict]:
             if match:
                 digits = "".join(ch for ch in match.group(1) if ch.isdigit())
                 if digits:
-                    candidates.append(int(digits))
+                    value = int(digits)
+                    # Отбрасываем очевидные годы (до 2100) и слишком маленькие суммы
+                    # — в каталоге машины стоят дороже ~10 000.
+                    if value >= 10_000 and value > 2100:
+                        candidates.append(value)
         if candidates:
             # Берём последнее подходящее число, чтобы игнорировать год/пробег в начале строки.
             return candidates[-1]
@@ -428,6 +434,18 @@ def parse_detail_page(url: str) -> dict:
     )
     description = description_el.get_text(" ", strip=True) if description_el else ""
 
+    price_el = soup.select_one(
+        ".advert__price, .price, [itemprop='price'], .catalog__price, .price-value"
+    )
+    price_text = price_el.get_text(" ", strip=True) if price_el else ""
+    if not price_text:
+        # Иногда цена прописана словами «Цена: ...» рядом с описанием
+        price_match = re.search(r"цена[:\s]*([\d\s]{3,})", soup.get_text(" ", strip=True), re.IGNORECASE)
+        price_text = price_match.group(1) if price_match else ""
+    price = _parse_int(price_text) if price_text else None
+    if price is not None and price < 10_000:
+        price = None
+
     image_el = soup.select_one(
         ".advert__photo img, .advert__img img, .post-photo img, .slider img, img[itemprop='image']"
     )
@@ -467,6 +485,7 @@ def parse_detail_page(url: str) -> dict:
         "brand_norm": _normalized(brand),
         "model_norm": _normalized(model),
         "image_url": image_url,
+        "price": price,
     }
 
 
@@ -585,15 +604,23 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     detail_brand_norm: Optional[str] = card.get("brand_norm")
     detail_model_norm: Optional[str] = card.get("model_norm")
     detail_year: Optional[int] = card.get("year")
+    detail_price: Optional[int] = card.get("price")
     image_url: Optional[str] = card.get("image_url")
     title_brand, title_model = _extract_brand_model_from_title(title)
     fetched_details = False
 
     def ensure_details(force: bool = False) -> None:
-        nonlocal description, mileage, detail_brand, detail_model, detail_year, detail_brand_norm, detail_model_norm, image_url, fetched_details
+        nonlocal description, mileage, detail_brand, detail_model, detail_year, detail_price, detail_brand_norm, detail_model_norm, image_url, fetched_details
         if fetched_details:
             return
-        already_have_core = description or mileage is not None or detail_brand is not None or detail_model is not None or detail_year is not None
+        already_have_core = (
+            description
+            or mileage is not None
+            or detail_brand is not None
+            or detail_model is not None
+            or detail_year is not None
+            or detail_price is not None
+        )
         if not force and already_have_core:
             return
         try:
@@ -605,7 +632,10 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             detail_brand_norm = details.get("brand_norm") or detail_brand_norm
             detail_model_norm = details.get("model_norm") or detail_model_norm
             detail_year = details.get("year") if details.get("year") is not None else detail_year
+            detail_price = details.get("price") if details.get("price") is not None else detail_price
             image_url = image_url or details.get("image_url")
+            if detail_price is not None:
+                card["price"] = detail_price
             fetched_details = True
         except Exception as exc:  # pragma: no cover - сетевые ошибки
             LOGGER.warning(
@@ -661,8 +691,12 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             ):
                 return False
 
-    if filters.max_price is not None and card.get("price") is not None and card["price"] > filters.max_price:
-        return False
+    if filters.max_price is not None:
+        if card.get("price") is None:
+            ensure_details(force=True)
+        price_value = card.get("price") if card.get("price") is not None else detail_price
+        if price_value is not None and price_value > filters.max_price:
+            return False
     if filters.min_year is not None:
         effective_year = detail_year if detail_year is not None else card.get("year")
         if effective_year is None:
