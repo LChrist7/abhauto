@@ -103,9 +103,13 @@ LOGGER = logging.getLogger(__name__)
 class FilterSettings:
     brand: Optional[str] = None
     model: Optional[str] = None
+    min_mileage: Optional[int] = None
     max_mileage: Optional[int] = None
     min_year: Optional[int] = None
+    min_price: Optional[int] = None
     max_price: Optional[int] = None
+    min_volume: Optional[float] = None
+    max_volume: Optional[float] = None
     description_keywords: List[str] = field(default_factory=list)
     page_count: int = DEFAULT_PAGE_COUNT
 
@@ -114,9 +118,10 @@ class FilterSettings:
             [
                 f"Марка: {self.brand or 'не задано'}",
                 f"Модель: {self.model or 'не задано'}",
-                f"Максимальный пробег: {self.max_mileage or 'не задано'}",
+                f"Пробег: {self.min_mileage or '-'} — {self.max_mileage or '-'}",
                 f"Минимальный год: {self.min_year or 'не задано'}",
-                f"Максимальная цена: {self.max_price or 'не задано'}",
+                f"Цена: {self.min_price or '-'} — {self.max_price or '-'}",
+                f"Объём двигателя: {self.min_volume or '-'} — {self.max_volume or '-'}",
                 f"Ключевые слова в описании: {', '.join(self.description_keywords) if self.description_keywords else 'не задано'}",
                 f"Страниц для поиска: {self.page_count}",
             ]
@@ -190,9 +195,13 @@ def _filter_signature(filters: FilterSettings) -> str:
         {
             "brand": _normalize_for_match(filters.brand or ""),
             "model": _normalize_for_match(filters.model or ""),
+            "min_mileage": filters.min_mileage,
             "max_mileage": filters.max_mileage,
             "min_year": filters.min_year,
+            "min_price": filters.min_price,
             "max_price": filters.max_price,
+            "min_volume": filters.min_volume,
+            "max_volume": filters.max_volume,
             "keywords": sorted(
                 [_normalize_for_match(kw) for kw in filters.description_keywords if kw.strip()]
             ),
@@ -232,13 +241,14 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Модель", callback_data="set_model"),
             ],
             [
-                InlineKeyboardButton("Макс. пробег", callback_data="set_mileage"),
+                InlineKeyboardButton("Пробег", callback_data="set_mileage"),
                 InlineKeyboardButton("Мин. год", callback_data="set_year"),
             ],
             [
-                InlineKeyboardButton("Макс. цена", callback_data="set_price"),
+                InlineKeyboardButton("Цена", callback_data="set_price"),
                 InlineKeyboardButton("Ключевые слова", callback_data="set_keywords"),
             ],
+            [InlineKeyboardButton("Объём", callback_data="set_volume")],
             [InlineKeyboardButton("Страницы поиска", callback_data="set_pages")],
             [InlineKeyboardButton("Показать фильтры", callback_data="show_filters")],
             [InlineKeyboardButton("Запустить поиск", callback_data="run_search")],
@@ -358,6 +368,8 @@ def _parse_listing_item(item) -> Optional[dict]:
     brand_norm = _normalized(brand)
     model_norm = _normalized(model)
 
+    volume = _extract_volume(block_text)
+
     return {
         "id": listing_id,
         "title": title,
@@ -371,6 +383,7 @@ def _parse_listing_item(item) -> Optional[dict]:
         "brand_norm": brand_norm,
         "model_norm": model_norm,
         "image_url": image_url,
+        "volume": volume,
     }
 
 
@@ -476,6 +489,13 @@ def parse_detail_page(url: str) -> dict:
     if not description:
         description = text_content
 
+    volume = None
+    engine_line = by_label(["двигатель"])
+    if engine_line:
+        volume = _extract_volume(engine_line)
+    if volume is None:
+        volume = _extract_volume(text_content)
+
     return {
         "brand": brand,
         "model": model,
@@ -486,6 +506,7 @@ def parse_detail_page(url: str) -> dict:
         "model_norm": _normalized(model),
         "image_url": image_url,
         "price": price,
+        "volume": volume,
     }
 
 
@@ -532,6 +553,57 @@ def _parse_int(value: Optional[str], *, scale_small: bool = False) -> Optional[i
     if scale_small and len(digits) < 4:
         number *= 1000
     return number
+
+
+def _parse_float(value: Optional[str]) -> Optional[float]:
+    """Парсит число с плавающей точкой из строки, используя точку или запятую."""
+
+    if not value:
+        return None
+    match = re.search(r"\d+(?:[\.,]\d+)?", value)
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _extract_volume(text: str) -> Optional[float]:
+    """Извлекает объём двигателя (в литрах) из произвольного текста."""
+
+    if not text:
+        return None
+    match = re.search(r"(\d+[\.,]?\d*)\s*л", text, re.IGNORECASE)
+    if match:
+        return _parse_float(match.group(1))
+    # Иногда объём следует после слова «двигатель» без «л»
+    engine_match = re.search(r"двигатель[^\d]*(\d+[\.,]?\d*)", text, re.IGNORECASE)
+    if engine_match:
+        return _parse_float(engine_match.group(1))
+    return None
+
+
+def _parse_range_int(text: str, *, scale_small: bool = False) -> tuple[Optional[int], Optional[int]]:
+    """Парсит диапазон целых чисел формата "мин-макс"."""
+
+    if not text:
+        return None, None
+    parts = re.split(r"[-–]", text)
+    min_value = _parse_int(parts[0], scale_small=scale_small) if parts else None
+    max_value = _parse_int(parts[1], scale_small=scale_small) if len(parts) > 1 else None
+    return min_value, max_value
+
+
+def _parse_range_float(text: str) -> tuple[Optional[float], Optional[float]]:
+    """Парсит диапазон чисел с плавающей точкой формата "мин-макс"."""
+
+    if not text:
+        return None, None
+    parts = re.split(r"[-–]", text)
+    min_value = _parse_float(parts[0]) if parts else None
+    max_value = _parse_float(parts[1]) if len(parts) > 1 else None
+    return min_value, max_value
 
 
 def _normalize_for_match(text: str) -> str:
@@ -617,12 +689,13 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     detail_model_norm: Optional[str] = card.get("model_norm")
     detail_year: Optional[int] = card.get("year")
     detail_price: Optional[int] = card.get("price")
+    detail_volume: Optional[float] = card.get("volume")
     image_url: Optional[str] = card.get("image_url")
     title_brand, title_model = _extract_brand_model_from_title(title)
     fetched_details = False
 
     def ensure_details(force: bool = False) -> None:
-        nonlocal description, mileage, detail_brand, detail_model, detail_year, detail_price, detail_brand_norm, detail_model_norm, image_url, fetched_details
+        nonlocal description, mileage, detail_brand, detail_model, detail_year, detail_price, detail_brand_norm, detail_model_norm, image_url, fetched_details, detail_volume
         if fetched_details:
             return
         already_have_core = (
@@ -632,6 +705,7 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             or detail_model is not None
             or detail_year is not None
             or detail_price is not None
+            or detail_volume is not None
         )
         if not force and already_have_core:
             return
@@ -645,9 +719,12 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             detail_model_norm = details.get("model_norm") or detail_model_norm
             detail_year = details.get("year") if details.get("year") is not None else detail_year
             detail_price = details.get("price") if details.get("price") is not None else detail_price
+            detail_volume = details.get("volume") if details.get("volume") is not None else detail_volume
             image_url = image_url or details.get("image_url")
             if detail_price is not None:
                 card["price"] = detail_price
+            if detail_volume is not None:
+                card["volume"] = detail_volume
             fetched_details = True
         except Exception as exc:  # pragma: no cover - сетевые ошибки
             LOGGER.warning(
@@ -703,12 +780,15 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             ):
                 return False
 
-    if filters.max_price is not None:
+    if filters.min_price is not None or filters.max_price is not None:
         if card.get("price") is None:
             ensure_details(force=True)
         price_value = card.get("price") if card.get("price") is not None else detail_price
-        if price_value is not None and price_value > filters.max_price:
-            return False
+        if price_value is not None:
+            if filters.min_price is not None and price_value < filters.min_price:
+                return False
+            if filters.max_price is not None and price_value > filters.max_price:
+                return False
     if filters.min_year is not None:
         effective_year = detail_year if detail_year is not None else card.get("year")
         if effective_year is None:
@@ -717,11 +797,24 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
         if effective_year is not None and effective_year < filters.min_year:
             return False
 
-    if filters.max_mileage is not None:
+    if filters.min_mileage is not None or filters.max_mileage is not None:
         if mileage is None:
             ensure_details(force=True)
-        if mileage is not None and mileage > filters.max_mileage:
-            return False
+        if mileage is not None:
+            if filters.min_mileage is not None and mileage < filters.min_mileage:
+                return False
+            if filters.max_mileage is not None and mileage > filters.max_mileage:
+                return False
+
+    if filters.min_volume is not None or filters.max_volume is not None:
+        if detail_volume is None:
+            ensure_details(force=True)
+        volume_value = card.get("volume") if card.get("volume") is not None else detail_volume
+        if volume_value is not None:
+            if filters.min_volume is not None and volume_value < filters.min_volume:
+                return False
+            if filters.max_volume is not None and volume_value > filters.max_volume:
+                return False
 
     if filters.description_keywords:
         ensure_details(force=True)
@@ -758,16 +851,27 @@ def parse_filter_args(args: list[str]) -> FilterSettings:
             settings.brand = value
         elif key == "model":
             settings.model = value
-        elif key == "max_mileage":
-            if value.isdigit():
-                settings.max_mileage = int(value)
+        elif key in {"mileage", "max_mileage", "min_mileage"}:
+            min_m, max_m = _parse_range_int(value, scale_small=True)
+            if min_m is not None:
+                settings.min_mileage = min_m
+            if max_m is not None:
+                settings.max_mileage = max_m
         elif key == "min_year":
             if value.isdigit():
                 settings.min_year = int(value)
-        elif key == "max_price":
-            digits = "".join(ch for ch in value if ch.isdigit())
-            if digits.isdigit():
-                settings.max_price = int(digits)
+        elif key in {"price", "max_price", "min_price"}:
+            min_p, max_p = _parse_range_int(value, scale_small=True)
+            if min_p is not None:
+                settings.min_price = min_p
+            if max_p is not None:
+                settings.max_price = max_p
+        elif key in {"volume", "engine", "engine_volume"}:
+            min_v, max_v = _parse_range_float(value)
+            if min_v is not None:
+                settings.min_volume = min_v
+            if max_v is not None:
+                settings.max_volume = max_v
         elif key == "keywords":
             settings.description_keywords = [word.strip() for word in value.split(",") if word.strip()]
         elif key in {"pages", "page_count"}:
@@ -874,9 +978,10 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     prompts = {
         "set_brand": "Введите марку (например, Toyota):",
         "set_model": "Введите модель (например, Camry):",
-        "set_mileage": "Введите максимальный пробег (в км):",
+        "set_mileage": "Введите диапазон пробега, например 10000-165000:",
         "set_year": "Введите минимальный год выпуска (например, 2010):",
-        "set_price": "Введите максимальную цену (число):",
+        "set_price": "Введите диапазон цены, например 400000-1500000:",
+        "set_volume": "Введите диапазон объёма двигателя, например 1.8-4.7:",
         "set_keywords": "Введите ключевые слова через запятую (например, левый руль, газ):",
         "set_pages": "Введите количество страниц для поиска (например, 3):",
     }
@@ -933,15 +1038,20 @@ async def handle_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         settings.model = text or None
         reply = f"Модель установлена: {settings.model or 'не задано'}"
     elif pending_field == "set_mileage":
-        settings.max_mileage = int(text) if text.isdigit() else None
-        reply = f"Максимальный пробег: {settings.max_mileage or 'не задано'}"
+        min_m, max_m = _parse_range_int(text, scale_small=True)
+        settings.min_mileage, settings.max_mileage = min_m, max_m
+        reply = f"Пробег: {settings.min_mileage or '-'} — {settings.max_mileage or '-'}"
     elif pending_field == "set_year":
         settings.min_year = int(text) if text.isdigit() else None
         reply = f"Минимальный год: {settings.min_year or 'не задано'}"
     elif pending_field == "set_price":
-        digits = "".join(ch for ch in text if ch.isdigit())
-        settings.max_price = int(digits) if digits.isdigit() else None
-        reply = f"Максимальная цена: {settings.max_price or 'не задано'}"
+        min_p, max_p = _parse_range_int(text, scale_small=True)
+        settings.min_price, settings.max_price = min_p, max_p
+        reply = f"Цена: {settings.min_price or '-'} — {settings.max_price or '-'}"
+    elif pending_field == "set_volume":
+        min_v, max_v = _parse_range_float(text)
+        settings.min_volume, settings.max_volume = min_v, max_v
+        reply = f"Объём двигателя: {settings.min_volume or '-'} — {settings.max_volume or '-'}"
     elif pending_field == "set_keywords":
         settings.description_keywords = [word.strip() for word in text.split(",") if word.strip()]
         reply = (
