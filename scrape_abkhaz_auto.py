@@ -213,6 +213,17 @@ def build_page_url(page: int) -> str:
     return CATEGORY_URL if page <= 1 else f"{CATEGORY_URL}?page={page}"
 
 
+def _extract_brand_model_from_title(title: str) -> tuple[Optional[str], Optional[str]]:
+    """Выделяет марку и модель из заголовка объявления."""
+
+    if not title:
+        return None, None
+    parts = title.split(maxsplit=1)
+    brand = parts[0] if parts else None
+    model = parts[1] if len(parts) > 1 else None
+    return brand, model
+
+
 def _parse_listing_item(item) -> Optional[dict]:
     """Извлекает данные объявления прямо со страницы списка.
 
@@ -261,13 +272,7 @@ def _parse_listing_item(item) -> Optional[dict]:
     if not description:
         description = info_text
 
-    brand = None
-    model = None
-    if title:
-        parts = title.split(maxsplit=1)
-        brand = parts[0]
-        if len(parts) > 1:
-            model = parts[1]
+    brand, model = _extract_brand_model_from_title(title)
 
     return {
         "id": listing_id,
@@ -465,6 +470,7 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     detail_brand: Optional[str] = card.get("brand")
     detail_model: Optional[str] = card.get("model")
     detail_year: Optional[int] = card.get("year")
+    title_brand, title_model = _extract_brand_model_from_title(title)
     fetched_details = False
 
     def _text_contains(text: str, needle: str) -> bool:
@@ -501,35 +507,23 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
 
     if filters.brand:
         ensure_details()
-        detail_brand_text = detail_brand or ""
-        if not (
-            _text_contains(title, filters.brand)
-            or _text_contains(detail_brand_text, filters.brand)
-            or _text_contains(description, filters.brand)
-        ):
+        brand_candidates = [card.get("brand"), title_brand, detail_brand, description, title]
+        if not any(_text_contains(candidate, filters.brand) for candidate in brand_candidates if candidate):
             ensure_details(force=True)
-            detail_brand_text = detail_brand or detail_brand_text
-            if not (
-                _text_contains(title, filters.brand)
-                or _text_contains(detail_brand_text, filters.brand)
-                or _text_contains(description, filters.brand)
+            brand_candidates = [card.get("brand"), title_brand, detail_brand, description, title]
+            if not any(
+                _text_contains(candidate, filters.brand) for candidate in brand_candidates if candidate
             ):
                 return False
 
     if filters.model:
         ensure_details()
-        detail_model_text = detail_model or ""
-        if not (
-            _text_contains(title, filters.model)
-            or _text_contains(detail_model_text, filters.model)
-            or _text_contains(description, filters.model)
-        ):
+        model_candidates = [card.get("model"), title_model, detail_model, description, title]
+        if not any(_text_contains(candidate, filters.model) for candidate in model_candidates if candidate):
             ensure_details(force=True)
-            detail_model_text = detail_model or detail_model_text
-            if not (
-                _text_contains(title, filters.model)
-                or _text_contains(detail_model_text, filters.model)
-                or _text_contains(description, filters.model)
+            model_candidates = [card.get("model"), title_model, detail_model, description, title]
+            if not any(
+                _text_contains(candidate, filters.model) for candidate in model_candidates if candidate
             ):
                 return False
 
@@ -558,10 +552,10 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
 
     card["mileage"] = mileage
     card["description"] = description
-    if detail_brand:
-        card["brand"] = detail_brand
-    if detail_model:
-        card["model"] = detail_model
+    if detail_brand or title_brand:
+        card["brand"] = detail_brand or title_brand
+    if detail_model or title_model:
+        card["model"] = detail_model or title_model
     if detail_year is not None:
         card["year"] = detail_year
     return True
