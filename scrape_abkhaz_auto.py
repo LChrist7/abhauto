@@ -123,6 +123,18 @@ class FilterSettings:
         )
 
 
+def _ensure_absolute_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    if url.startswith("http"):
+        return url
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("/"):
+        return f"https://abkhaz-auto.ru{url}"
+    return url
+
+
 async def _safe_reply_text(message, text: str, **kwargs):
     """Отправляет сообщение с повторной попыткой при тайм-ауте."""
 
@@ -140,6 +152,27 @@ async def _safe_reply_text(message, text: str, **kwargs):
     except Exception as exc:  # pragma: no cover - сетевые сбои
         LOGGER.error("Ошибка при отправке сообщения: %s", exc)
         return None
+
+
+async def _safe_reply_photo(message, photo_url: str, caption: str) -> None:
+    """Безопасно отправляет фото с подписью, с повторной попыткой при тайм-ауте."""
+
+    if not message:
+        return
+    try:
+        await message.reply_photo(photo=photo_url, caption=caption)
+        return
+    except TimedOut:
+        LOGGER.warning("Таймаут при отправке фото, повторяем")
+        try:
+            await message.reply_photo(photo=photo_url, caption=caption)
+            return
+        except TimedOut:
+            LOGGER.error("Не удалось отправить фото из-за тайм-аута Telegram")
+            return
+    except Exception as exc:  # pragma: no cover - сетевые сбои
+        LOGGER.error("Ошибка при отправке фото: %s", exc)
+        return
 
 
 async def _reply_in_chunks(message, lines: list[str], chunk_size: int = 8) -> None:
@@ -285,6 +318,18 @@ def _parse_listing_item(item) -> Optional[dict]:
     info_text = " ".join(item.select_one("p").stripped_strings) if item.select_one("p") else ""
     block_text = " ".join(item.stripped_strings)
 
+    image_el = (
+        item.select_one(".catalog__image img, .catalog__img img, img")
+        or item.select_one("img")
+    )
+    image_url = None
+    if image_el:
+        for attr in ("data-src", "data-original", "src"):
+            candidate = image_el.get(attr)
+            if candidate:
+                image_url = _ensure_absolute_url(candidate)
+                break
+
     price_source = price_el.get_text(" ", strip=True) if price_el else ""
     if not price_source:
         price_source = info_text or block_text
@@ -319,6 +364,7 @@ def _parse_listing_item(item) -> Optional[dict]:
         "model": model,
         "brand_norm": brand_norm,
         "model_norm": model_norm,
+        "image_url": image_url,
     }
 
 
@@ -382,6 +428,20 @@ def parse_detail_page(url: str) -> dict:
     )
     description = description_el.get_text(" ", strip=True) if description_el else ""
 
+    image_el = soup.select_one(
+        ".advert__photo img, .advert__img img, .post-photo img, .slider img, img[itemprop='image']"
+    )
+    if not image_el:
+        og_image = soup.find("meta", property="og:image")
+        image_url = _ensure_absolute_url(og_image["content"]) if og_image and og_image.get("content") else None
+    else:
+        image_url = None
+        for attr in ("data-src", "data-original", "src"):
+            candidate = image_el.get(attr)
+            if candidate:
+                image_url = _ensure_absolute_url(candidate)
+                break
+
     # Попытка достать поля из таблицы параметров (часто .advert__info или .params)
     brand = by_label(["марка", "бренд"])
     model = by_label(["модель"])
@@ -406,6 +466,7 @@ def parse_detail_page(url: str) -> dict:
         "description": description,
         "brand_norm": _normalized(brand),
         "model_norm": _normalized(model),
+        "image_url": image_url,
     }
 
 
@@ -524,11 +585,12 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     detail_brand_norm: Optional[str] = card.get("brand_norm")
     detail_model_norm: Optional[str] = card.get("model_norm")
     detail_year: Optional[int] = card.get("year")
+    image_url: Optional[str] = card.get("image_url")
     title_brand, title_model = _extract_brand_model_from_title(title)
     fetched_details = False
 
     def ensure_details(force: bool = False) -> None:
-        nonlocal description, mileage, detail_brand, detail_model, detail_year, detail_brand_norm, detail_model_norm, fetched_details
+        nonlocal description, mileage, detail_brand, detail_model, detail_year, detail_brand_norm, detail_model_norm, image_url, fetched_details
         if fetched_details:
             return
         already_have_core = description or mileage is not None or detail_brand is not None or detail_model is not None or detail_year is not None
@@ -543,6 +605,7 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             detail_brand_norm = details.get("brand_norm") or detail_brand_norm
             detail_model_norm = details.get("model_norm") or detail_model_norm
             detail_year = details.get("year") if details.get("year") is not None else detail_year
+            image_url = image_url or details.get("image_url")
             fetched_details = True
         except Exception as exc:  # pragma: no cover - сетевые ошибки
             LOGGER.warning(
@@ -630,6 +693,8 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
         card["model_norm"] = _normalized(card["model"])
     if detail_year is not None:
         card["year"] = detail_year
+    if image_url:
+        card["image_url"] = image_url
     return True
 
 
@@ -726,20 +791,38 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not matches:
         await _safe_reply_text(message, "Ничего не найдено по текущим фильтрам.")
         return
-    reply_lines = [f"Найдено {len(matches)} объявлений:"]
+    await _safe_reply_text(
+        message,
+        f"Найдено {len(matches)} объявлений. Отправляю результаты по одному сообщению...",
+    )
     for card in matches:
-        line = f"{card['title']} ({card.get('year') or 'год?'}), цена: {card.get('price') or '—'}"
-        if card.get("mileage"):
-            line += f", пробег: {card['mileage']} км"
-        line += f"\n{card['url']}"
-        reply_lines.append(line)
-    await _reply_in_chunks(message, reply_lines)
+        caption = _format_listing(card)
+        photo_url = card.get("image_url")
+        if photo_url:
+            await _safe_reply_photo(message, photo_url, caption)
+        else:
+            await _safe_reply_text(message, caption)
 
 
 def _ensure_filter_storage(context: ContextTypes.DEFAULT_TYPE) -> FilterSettings:
     settings: FilterSettings = context.user_data.get("filters") or FilterSettings()
     context.user_data["filters"] = settings
     return settings
+
+
+def _format_listing(card: dict) -> str:
+    parts = [card.get("title") or "Объявление", card.get("url") or ""]
+    year = card.get("year") or "год?"
+    price = card.get("price") or "—"
+    mileage = card.get("mileage")
+    description = card.get("description") or ""
+    details_lines = [f"Год: {year}", f"Цена: {price}"]
+    if mileage is not None:
+        details_lines.append(f"Пробег: {mileage} км")
+    if description:
+        details_lines.append(description[:400])
+    parts.insert(1, "\n".join(details_lines))
+    return "\n\n".join([p for p in parts if p])
 
 
 async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
