@@ -219,21 +219,64 @@ def _extract_mileage(text: str) -> Optional[int]:
 
 
 def matches_filters(card: dict, filters: FilterSettings) -> bool:
-    title = card.get("title", "")
-    url = card.get("url", "")
-    mileage, description = parse_detail_page(url)
+    """
+    Проверяет объявление по заданным фильтрам.
 
-    if filters.brand and filters.brand.lower() not in title.lower() and filters.brand.lower() not in description.lower():
-        return False
-    if filters.model and filters.model.lower() not in title.lower() and filters.model.lower() not in description.lower():
-        return False
+    Детали объявления загружаются только при необходимости (пробег,
+    ключевые слова или если марка/модель не найдены в заголовке), что
+    позволяет находить совпадения по марке даже при ошибках парсинга
+    детальной страницы.
+    """
+
+    title = card.get("title", "")
+    title_lower = title.lower()
+
+    description = ""
+    mileage: Optional[int] = None
+
+    def ensure_details() -> None:
+        nonlocal description, mileage
+        if description or mileage is not None:
+            return
+        try:
+            mileage_val, description_text = parse_detail_page(card.get("url", ""))
+            mileage = mileage_val
+            description = description_text
+        except Exception as exc:  # pragma: no cover - сетевые ошибки
+            LOGGER.warning(
+                "Не удалось загрузить детали объявления %s: %s",
+                card.get("url"),
+                exc,
+            )
+            description = ""
+            mileage = None
+
+    if filters.brand:
+        brand_lower = filters.brand.lower()
+        if brand_lower not in title_lower:
+            ensure_details()
+            if brand_lower not in description.lower():
+                return False
+
+    if filters.model:
+        model_lower = filters.model.lower()
+        if model_lower not in title_lower:
+            ensure_details()
+            if model_lower not in description.lower():
+                return False
+
     if filters.max_price is not None and card.get("price") is not None and card["price"] > filters.max_price:
         return False
     if filters.min_year is not None and card.get("year") is not None and card["year"] < filters.min_year:
         return False
-    if filters.max_mileage is not None and mileage is not None and mileage > filters.max_mileage:
-        return False
+
+    if filters.max_mileage is not None:
+        ensure_details()
+        if mileage is not None and mileage > filters.max_mileage:
+            return False
+
     if filters.description_keywords:
+        ensure_details()
         desc_lower = description.lower()
         if not all(keyword.lower() in desc_lower for keyword in filters.description_keywords):
             return False
