@@ -224,6 +224,15 @@ def _extract_brand_model_from_title(title: str) -> tuple[Optional[str], Optional
     return brand, model
 
 
+def _normalized(value: Optional[str]) -> Optional[str]:
+    """Возвращает нормализованную строку или None."""
+
+    if not value:
+        return None
+    normalized = _normalize_for_match(value)
+    return normalized or None
+
+
 def _parse_listing_item(item) -> Optional[dict]:
     """Извлекает данные объявления прямо со страницы списка.
 
@@ -290,6 +299,8 @@ def _parse_listing_item(item) -> Optional[dict]:
         description = info_text
 
     brand, model = _extract_brand_model_from_title(title)
+    brand_norm = _normalized(brand)
+    model_norm = _normalized(model)
 
     return {
         "id": listing_id,
@@ -301,6 +312,8 @@ def _parse_listing_item(item) -> Optional[dict]:
         "description": description,
         "brand": brand,
         "model": model,
+        "brand_norm": brand_norm,
+        "model_norm": model_norm,
     }
 
 
@@ -385,6 +398,8 @@ def parse_detail_page(url: str) -> dict:
         "year": year,
         "mileage": mileage,
         "description": description,
+        "brand_norm": _normalized(brand),
+        "model_norm": _normalized(model),
     }
 
 
@@ -500,6 +515,8 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     mileage: Optional[int] = card.get("mileage")
     detail_brand: Optional[str] = card.get("brand")
     detail_model: Optional[str] = card.get("model")
+    detail_brand_norm: Optional[str] = card.get("brand_norm")
+    detail_model_norm: Optional[str] = card.get("model_norm")
     detail_year: Optional[int] = card.get("year")
     title_brand, title_model = _extract_brand_model_from_title(title)
     fetched_details = False
@@ -517,6 +534,8 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             description = details.get("description") or description
             detail_brand = details.get("brand") or detail_brand
             detail_model = details.get("model") or detail_model
+            detail_brand_norm = details.get("brand_norm") or detail_brand_norm
+            detail_model_norm = details.get("model_norm") or detail_model_norm
             detail_year = details.get("year") if details.get("year") is not None else detail_year
             fetched_details = True
         except Exception as exc:  # pragma: no cover - сетевые ошибки
@@ -529,20 +548,48 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
 
     if filters.brand:
         ensure_details()
-        brand_candidates = [card.get("brand"), title_brand, detail_brand]
-        if not any(_match_value(candidate, filters.brand) for candidate in brand_candidates):
+        brand_filter = _normalized(filters.brand)
+        ensure_details()
+        brand_candidates = [
+            card.get("brand_norm") or _normalized(card.get("brand")),
+            _normalized(title_brand),
+            detail_brand_norm or _normalized(detail_brand),
+        ]
+        if brand_filter and not any(
+            candidate and brand_filter in candidate for candidate in brand_candidates
+        ):
             ensure_details(force=True)
-            brand_candidates = [card.get("brand"), title_brand, detail_brand]
-            if not any(_match_value(candidate, filters.brand) for candidate in brand_candidates):
+            brand_candidates = [
+                card.get("brand_norm") or _normalized(card.get("brand")),
+                _normalized(title_brand),
+                detail_brand_norm or _normalized(detail_brand),
+            ]
+            if not any(
+                candidate and brand_filter in candidate for candidate in brand_candidates
+            ):
                 return False
 
     if filters.model:
         ensure_details()
-        model_candidates = [card.get("model"), title_model, detail_model]
-        if not any(_match_value(candidate, filters.model) for candidate in model_candidates):
+        model_filter = _normalized(filters.model)
+        ensure_details()
+        model_candidates = [
+            card.get("model_norm") or _normalized(card.get("model")),
+            _normalized(title_model),
+            detail_model_norm or _normalized(detail_model),
+        ]
+        if model_filter and not any(
+            candidate and model_filter in candidate for candidate in model_candidates
+        ):
             ensure_details(force=True)
-            model_candidates = [card.get("model"), title_model, detail_model]
-            if not any(_match_value(candidate, filters.model) for candidate in model_candidates):
+            model_candidates = [
+                card.get("model_norm") or _normalized(card.get("model")),
+                _normalized(title_model),
+                detail_model_norm or _normalized(detail_model),
+            ]
+            if not any(
+                candidate and model_filter in candidate for candidate in model_candidates
+            ):
                 return False
 
     if filters.max_price is not None and card.get("price") is not None and card["price"] > filters.max_price:
@@ -572,8 +619,10 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     card["description"] = description
     if detail_brand or title_brand:
         card["brand"] = detail_brand or title_brand
+        card["brand_norm"] = _normalized(card["brand"])
     if detail_model or title_model:
         card["model"] = detail_model or title_model
+        card["model_norm"] = _normalized(card["model"])
     if detail_year is not None:
         card["year"] = detail_year
     return True
