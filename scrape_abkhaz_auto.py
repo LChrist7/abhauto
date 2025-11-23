@@ -289,7 +289,20 @@ def _get_seen_map(application) -> dict[str, set[str]]:
     return seen_map
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+def _is_subscribed(job_queue, chat_id: Optional[int]) -> bool:
+    if not job_queue or chat_id is None:
+        return False
+    job_name = f"subscription_{chat_id}"
+    return bool(job_queue.get_jobs_by_name(job_name))
+
+
+def main_menu_keyboard(job_queue=None, chat_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    subscribed = _is_subscribed(job_queue, chat_id)
+    subscribe_button = InlineKeyboardButton(
+        "Отписаться" if subscribed else "Подписаться",
+        callback_data="unsubscribe" if subscribed else "subscribe",
+    )
+
     return InlineKeyboardMarkup(
         [
             [
@@ -308,7 +321,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("Страницы поиска", callback_data="set_pages")],
             [InlineKeyboardButton("Показать фильтры", callback_data="show_filters")],
             [InlineKeyboardButton("Запустить поиск", callback_data="run_search")],
-            [InlineKeyboardButton("Подписаться", callback_data="subscribe")],
+            [subscribe_button],
         ]
     )
 
@@ -950,7 +963,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Привет! Я буду искать объявления на abkhaz-auto.ru.\n"
         "Можешь воспользоваться кнопками ниже для настройки фильтров или командой /filters.\n"
         "После выбора фильтров нажми «Запустить поиск». Можно указать, сколько страниц смотреть.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(context.application.job_queue, update.effective_chat.id if update.effective_chat else None),
     )
     return CHOOSING
 
@@ -960,7 +973,9 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     message = update.effective_message
     if message:
         await _safe_reply_text(
-            message, "Выберите, что настроить:", reply_markup=main_menu_keyboard()
+            message,
+            "Выберите, что настроить:",
+            reply_markup=main_menu_keyboard(context.application.job_queue, update.effective_chat.id if update.effective_chat else None),
         )
     return CHOOSING
 
@@ -1012,6 +1027,29 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         message,
         "Подписка активирована. Каждые 2 минуты буду присылать новые подходящие объявления.",
     )
+    return CHOOSING
+
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет активную подписку и останавливает задачу опроса."""
+
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or not message:
+        return CHOOSING
+
+    job_queue = context.application.job_queue
+    job_name = f"subscription_{chat.id}"
+    removed = False
+    for job in job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+        removed = True
+
+    if removed:
+        await _safe_reply_text(message, "Подписка отключена. Чтобы снова включить, нажмите «Подписаться».")
+    else:
+        await _safe_reply_text(message, "Активная подписка не найдена.")
+
     return CHOOSING
 
 
@@ -1144,7 +1182,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _safe_reply_text(
             query.message,
             "Можешь продолжить настройку или запустить поиск:",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(context.application.job_queue, update.effective_chat.id if update.effective_chat else None),
         )
         return CHOOSING
 
@@ -1153,7 +1191,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _safe_reply_text(
             query.message,
             "Продолжить настройку фильтров?",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(context.application.job_queue, update.effective_chat.id if update.effective_chat else None),
         )
         return CHOOSING
 
@@ -1162,7 +1200,16 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _safe_reply_text(
             query.message,
             "Подписка сохранена. Что-нибудь ещё настроить?",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(context.application.job_queue, update.effective_chat.id if update.effective_chat else None),
+        )
+        return CHOOSING
+
+    if action == "unsubscribe":
+        await unsubscribe(update, context)
+        await _safe_reply_text(
+            query.message,
+            "Подписка остановлена. Хотите настроить что-то ещё?",
+            reply_markup=main_menu_keyboard(context.application.job_queue, update.effective_chat.id if update.effective_chat else None),
         )
         return CHOOSING
 
@@ -1170,7 +1217,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _safe_reply_text(
         query.message,
         "Неизвестная команда. Выберите действие на клавиатуре:",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(context.application.job_queue, update.effective_chat.id if update.effective_chat else None),
     )
     return CHOOSING
 
@@ -1184,7 +1231,7 @@ async def handle_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await _safe_reply_text(
             update.message,
             "Не удалось определить, что вы хотите изменить. Выберите действие на клавиатуре:",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(context.application.job_queue, update.effective_chat.id if update.effective_chat else None),
         )
         return CHOOSING
 
@@ -1226,7 +1273,9 @@ async def handle_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     context.user_data.pop("pending_field", None)
     await _safe_reply_text(update.message, reply)
     await _safe_reply_text(
-        update.message, "Далее?", reply_markup=main_menu_keyboard()
+        update.message,
+        "Далее?",
+        reply_markup=main_menu_keyboard(context.application.job_queue, update.effective_chat.id if update.effective_chat else None),
     )
     return CHOOSING
 
@@ -1274,6 +1323,7 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("search", search))
     application.add_handler(CommandHandler("showfilters", show_filters))
     application.add_handler(CommandHandler("subscribe", subscribe))
+    application.add_handler(CommandHandler("unsubscribe", unsubscribe))
     application.add_error_handler(handle_error)
 
     LOGGER.info("Бот запущен. Ожидание команд...")
