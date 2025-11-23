@@ -432,19 +432,24 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     """
 
     title = card.get("title", "")
-    title_lower = title.lower()
-    title_normalized = _normalize_for_match(title)
-
     description = card.get("description", "") or ""
-    description_normalized = _normalize_for_match(description) if description else ""
     mileage: Optional[int] = card.get("mileage")
     detail_brand: Optional[str] = card.get("brand")
     detail_model: Optional[str] = card.get("model")
     detail_year: Optional[int] = card.get("year")
     fetched_details = False
 
+    def _text_contains(text: str, needle: str) -> bool:
+        if not text or not needle:
+            return False
+        lower = text.lower()
+        normalized = _normalize_for_match(text)
+        needle_lower = needle.lower()
+        needle_normalized = _normalize_for_match(needle)
+        return needle_lower in lower or needle_normalized in normalized
+
     def ensure_details(force: bool = False) -> None:
-        nonlocal description, mileage, description_normalized, detail_brand, detail_model, detail_year, fetched_details
+        nonlocal description, mileage, detail_brand, detail_model, detail_year, fetched_details
         if fetched_details:
             return
         already_have_core = description or mileage is not None or detail_brand is not None or detail_model is not None or detail_year is not None
@@ -457,7 +462,6 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             detail_brand = details.get("brand") or detail_brand
             detail_model = details.get("model") or detail_model
             detail_year = details.get("year") if details.get("year") is not None else detail_year
-            description_normalized = _normalize_for_match(description) if description else description_normalized
             fetched_details = True
         except Exception as exc:  # pragma: no cover - сетевые ошибки
             LOGGER.warning(
@@ -468,56 +472,36 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             fetched_details = True
 
     if filters.brand:
-        brand_lower = filters.brand.lower()
-        brand_normalized = _normalize_for_match(filters.brand)
         ensure_details()
-        detail_brand_text = (detail_brand or "")
-        if (
-            brand_lower not in title_lower
-            and brand_normalized not in title_normalized
-            and brand_lower not in detail_brand_text.lower()
-            and brand_normalized not in _normalize_for_match(detail_brand_text)
-            and brand_lower not in description.lower()
-            and brand_normalized not in description_normalized
+        detail_brand_text = detail_brand or ""
+        if not (
+            _text_contains(title, filters.brand)
+            or _text_contains(detail_brand_text, filters.brand)
+            or _text_contains(description, filters.brand)
         ):
             ensure_details(force=True)
             detail_brand_text = detail_brand or detail_brand_text
-            if description and not description_normalized:
-                description_normalized = _normalize_for_match(description)
-            if (
-                brand_lower not in title_lower
-                and brand_normalized not in title_normalized
-                and brand_lower not in (detail_brand_text or "").lower()
-                and brand_normalized not in _normalize_for_match(detail_brand_text or "")
-                and brand_lower not in description.lower()
-                and brand_normalized not in (description_normalized or "")
+            if not (
+                _text_contains(title, filters.brand)
+                or _text_contains(detail_brand_text, filters.brand)
+                or _text_contains(description, filters.brand)
             ):
                 return False
 
     if filters.model:
-        model_lower = filters.model.lower()
-        model_normalized = _normalize_for_match(filters.model)
         ensure_details()
-        detail_model_text = (detail_model or "")
-        if (
-            model_lower not in title_lower
-            and model_normalized not in title_normalized
-            and model_lower not in detail_model_text.lower()
-            and model_normalized not in _normalize_for_match(detail_model_text)
-            and model_lower not in description.lower()
-            and model_normalized not in description_normalized
+        detail_model_text = detail_model or ""
+        if not (
+            _text_contains(title, filters.model)
+            or _text_contains(detail_model_text, filters.model)
+            or _text_contains(description, filters.model)
         ):
             ensure_details(force=True)
             detail_model_text = detail_model or detail_model_text
-            if description and not description_normalized:
-                description_normalized = _normalize_for_match(description)
-            if (
-                model_lower not in title_lower
-                and model_normalized not in title_normalized
-                and model_lower not in (detail_model_text or "").lower()
-                and model_normalized not in _normalize_for_match(detail_model_text or "")
-                and model_lower not in description.lower()
-                and model_normalized not in (description_normalized or "")
+            if not (
+                _text_contains(title, filters.model)
+                or _text_contains(detail_model_text, filters.model)
+                or _text_contains(description, filters.model)
             ):
                 return False
 
@@ -540,12 +524,8 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     if filters.description_keywords:
         if not description:
             ensure_details(force=True)
-        desc_lower = description.lower()
-        desc_normalized = description_normalized or _normalize_for_match(description)
         for keyword in filters.description_keywords:
-            keyword_lower = keyword.lower()
-            keyword_norm = _normalize_for_match(keyword)
-            if keyword_lower not in desc_lower and keyword_norm not in desc_normalized:
+            if not _text_contains(description, keyword):
                 return False
 
     card["mileage"] = mileage
