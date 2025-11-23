@@ -20,14 +20,10 @@ import os
 # возвращал pytz-объект даже при конфигурации zoneinfo.
 os.environ.setdefault("TZLOCAL_USE_DEPRECATED_PYTZ", "1")
 
-# Принудительно заставляем tzlocal возвращать pytz-таймзону до инициализации
-# JobQueue внутри Application.builder(), чтобы APScheduler не падал на zoneinfo.
-tzlocal.get_localzone = lambda: pytz.UTC  # type: ignore[assignment]
-
-import json
-import logging
 import asyncio
 import importlib.util
+import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -36,6 +32,10 @@ import pytz
 import requests
 import tzlocal
 from bs4 import BeautifulSoup
+
+# Принудительно заставляем tzlocal возвращать pytz-таймзону до инициализации
+# JobQueue внутри Application.builder(), чтобы APScheduler не падал на zoneinfo.
+tzlocal.get_localzone = lambda: pytz.UTC  # type: ignore[assignment]
 
 _telegram_spec = importlib.util.find_spec("telegram")
 _telegram_ext_spec = importlib.util.find_spec("telegram.ext")
