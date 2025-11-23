@@ -64,8 +64,16 @@ if _telegram_spec is None or _telegram_ext_spec is None:
         "Требуется установить библиотеку python-telegram-bot (например, `pip install python-telegram-bot>=20`)."
     )
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
 
 # Base configuration
@@ -73,6 +81,12 @@ CATEGORY_URL = "https://abkhaz-auto.ru/category/188"
 SEEN_FILE = Path("seen_listings.json")
 PAGE_COUNT = 4  # base page + next 3 pages
 DEFAULT_BOT_TOKEN = "8277337729:AAHgG2z4cet7VGJJlXnn57kbpoXapkj7Mw0"
+
+# Conversation states
+(
+    CHOOSING,
+    TYPING_VALUE,
+) = range(2)
 
 
 # Logging setup
@@ -117,6 +131,27 @@ def load_seen() -> set[str]:
 
 def save_seen(ids: Iterable[str]) -> None:
     SEEN_FILE.write_text(json.dumps(list(ids), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Марка", callback_data="set_brand"),
+                InlineKeyboardButton("Модель", callback_data="set_model"),
+            ],
+            [
+                InlineKeyboardButton("Макс. пробег", callback_data="set_mileage"),
+                InlineKeyboardButton("Мин. год", callback_data="set_year"),
+            ],
+            [
+                InlineKeyboardButton("Макс. цена", callback_data="set_price"),
+                InlineKeyboardButton("Ключевые слова", callback_data="set_keywords"),
+            ],
+            [InlineKeyboardButton("Показать фильтры", callback_data="show_filters")],
+            [InlineKeyboardButton("Запустить поиск", callback_data="run_search")],
+        ]
+    )
 
 
 def build_page_url(page: int) -> str:
@@ -237,13 +272,25 @@ def parse_filter_args(args: list[str]) -> FilterSettings:
     return settings
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.setdefault("filters", FilterSettings())
     await update.message.reply_text(
         "Привет! Я буду искать объявления на abkhaz-auto.ru.\n"
-        "Настрой фильтры командой /filters, пример:\n"
-        "``/filters brand=Toyota; model=Camry; max_mileage=150000; min_year=2010; max_price=1200000; keywords=левый руль,газ``\n"
-        "Используй /search чтобы получить актуальные объявления."
+        "Можешь воспользоваться кнопками ниже для настройки фильтров или командой /filters.\n"
+        "После выбора фильтров нажми «Запустить поиск».",
+        reply_markup=main_menu_keyboard(),
     )
+    return CHOOSING
+
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.setdefault("filters", FilterSettings())
+    message = update.effective_message
+    if message:
+        await message.reply_text(
+            "Выберите, что настроить:", reply_markup=main_menu_keyboard()
+        )
+    return CHOOSING
 
 
 async def set_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -256,12 +303,17 @@ async def set_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def show_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: FilterSettings = context.user_data.get("filters") or FilterSettings()
-    await update.message.reply_text("Текущие фильтры:\n" + settings.describe())
+    message = update.effective_message
+    if message:
+        await message.reply_text("Текущие фильтры:\n" + settings.describe())
 
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: FilterSettings = context.user_data.get("filters") or FilterSettings()
-    await update.message.reply_text("Начинаю поиск объявлений...")
+    message = update.effective_message
+    if not message:
+        return
+    await message.reply_text("Начинаю поиск объявлений...")
     seen = load_seen()
     listings = fetch_listings()
     matches: list[dict] = []
@@ -277,7 +329,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
     save_seen(seen)
     if not matches:
-        await update.message.reply_text("Ничего не найдено по текущим фильтрам.")
+        await message.reply_text("Ничего не найдено по текущим фильтрам.")
         return
     reply_lines = [f"Найдено {len(matches)} объявлений:"]
     for card in matches:
@@ -286,7 +338,104 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             line += f", пробег: {card['mileage']} км"
         line += f"\n{card['url']}"
         reply_lines.append(line)
-    await update.message.reply_text("\n\n".join(reply_lines))
+    await message.reply_text("\n\n".join(reply_lines))
+
+
+def _ensure_filter_storage(context: ContextTypes.DEFAULT_TYPE) -> FilterSettings:
+    settings: FilterSettings = context.user_data.get("filters") or FilterSettings()
+    context.user_data["filters"] = settings
+    return settings
+
+
+async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return CHOOSING
+    await query.answer()
+    action = query.data or ""
+    settings = _ensure_filter_storage(context)
+
+    prompts = {
+        "set_brand": "Введите марку (например, Toyota):",
+        "set_model": "Введите модель (например, Camry):",
+        "set_mileage": "Введите максимальный пробег (в км):",
+        "set_year": "Введите минимальный год выпуска (например, 2010):",
+        "set_price": "Введите максимальную цену (число):",
+        "set_keywords": "Введите ключевые слова через запятую (например, левый руль, газ):",
+    }
+
+    if action in prompts:
+        context.user_data["pending_field"] = action
+        await query.message.reply_text(prompts[action])
+        return TYPING_VALUE
+
+    if action == "show_filters":
+        await show_filters(update, context)
+        await query.message.reply_text(
+            "Можешь продолжить настройку или запустить поиск:",
+            reply_markup=main_menu_keyboard(),
+        )
+        return CHOOSING
+
+    if action == "run_search":
+        await search(update, context)
+        await query.message.reply_text(
+            "Продолжить настройку фильтров?",
+            reply_markup=main_menu_keyboard(),
+        )
+        return CHOOSING
+
+    # Неизвестное действие — показать меню
+    await query.message.reply_text(
+        "Неизвестная команда. Выберите действие на клавиатуре:",
+        reply_markup=main_menu_keyboard(),
+    )
+    return CHOOSING
+
+
+async def handle_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    pending_field = context.user_data.get("pending_field")
+    settings = _ensure_filter_storage(context)
+    text = (update.message.text or "").strip()
+
+    if not pending_field:
+        await update.message.reply_text(
+            "Не удалось определить, что вы хотите изменить. Выберите действие на клавиатуре:",
+            reply_markup=main_menu_keyboard(),
+        )
+        return CHOOSING
+
+    if pending_field == "set_brand":
+        settings.brand = text or None
+        reply = f"Марка установлена: {settings.brand or 'не задано'}"
+    elif pending_field == "set_model":
+        settings.model = text or None
+        reply = f"Модель установлена: {settings.model or 'не задано'}"
+    elif pending_field == "set_mileage":
+        settings.max_mileage = int(text) if text.isdigit() else None
+        reply = f"Максимальный пробег: {settings.max_mileage or 'не задано'}"
+    elif pending_field == "set_year":
+        settings.min_year = int(text) if text.isdigit() else None
+        reply = f"Минимальный год: {settings.min_year or 'не задано'}"
+    elif pending_field == "set_price":
+        digits = "".join(ch for ch in text if ch.isdigit())
+        settings.max_price = int(digits) if digits.isdigit() else None
+        reply = f"Максимальная цена: {settings.max_price or 'не задано'}"
+    elif pending_field == "set_keywords":
+        settings.description_keywords = [word.strip() for word in text.split(",") if word.strip()]
+        reply = (
+            "Ключевые слова: "
+            + (", ".join(settings.description_keywords) if settings.description_keywords else "не задано")
+        )
+    else:
+        reply = "Неизвестный фильтр"
+
+    context.user_data.pop("pending_field", None)
+    await update.message.reply_text(reply)
+    await update.message.reply_text(
+        "Далее?", reply_markup=main_menu_keyboard()
+    )
+    return CHOOSING
 
 
 def run_bot() -> None:
@@ -303,7 +452,19 @@ def run_bot() -> None:
         asyncio.set_event_loop(loop)
 
     application = Application.builder().token(token).build()
-    application.add_handler(CommandHandler("start", start))
+
+    conversation = ConversationHandler(
+        entry_points=[CommandHandler("start", start), CommandHandler("menu", show_menu)],
+        states={
+            CHOOSING: [CallbackQueryHandler(handle_menu_choice)],
+            TYPING_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_value)],
+        },
+        fallbacks=[CommandHandler("menu", show_menu), CommandHandler("start", start)],
+        name="filter_conversation",
+        persistent=False,
+    )
+
+    application.add_handler(conversation)
     application.add_handler(CommandHandler("filters", set_filters))
     application.add_handler(CommandHandler("search", search))
     application.add_handler(CommandHandler("showfilters", show_filters))
