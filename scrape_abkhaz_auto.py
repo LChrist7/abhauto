@@ -805,23 +805,15 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not message:
         return
     await _safe_reply_text(message, "Начинаю поиск объявлений...")
-    seen_map = load_seen()
-    signature = _filter_signature(settings)
-    seen_for_filter = set(seen_map.get(signature, set()))
     listings = fetch_listings(settings.page_count)
     matches: list[dict] = []
     for card in listings:
-        if card["id"] in seen_for_filter:
-            continue
         try:
             if matches_filters(card, settings):
                 matches.append(card)
-                seen_for_filter.add(card["id"])
         except Exception as exc:  # pragma: no cover - network parsing errors
             LOGGER.warning("Ошибка при обработке объявления %s: %s", card.get("url"), exc)
             continue
-    seen_map[signature] = seen_for_filter
-    save_seen(seen_map)
     if not matches:
         await _safe_reply_text(message, "Ничего не найдено по текущим фильтрам.")
         return
