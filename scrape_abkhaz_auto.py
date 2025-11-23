@@ -246,7 +246,8 @@ def _parse_listing_item(item) -> Optional[dict]:
     описание без перехода на детальную страницу.
     """
 
-    link = item.select_one("a[href]")
+    detail_link = item.find("a", string=re.compile("подробнее", re.IGNORECASE))
+    link = detail_link or item.select_one("a[href]")
     title_el = item.select_one(".catalog__title") or item.select_one(".allad_h") or link
     if not link or not title_el:
         return None
@@ -372,7 +373,7 @@ def parse_detail_page(url: str) -> dict:
         return None
 
     description_el = soup.select_one(
-        ".description, .catalog__description, .advert__text, [itemprop='description']"
+        "p.post_body, .description, .catalog__description, .advert__text, [itemprop='description']"
     )
     description = description_el.get_text(" ", strip=True) if description_el else ""
 
@@ -609,8 +610,7 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
             return False
 
     if filters.description_keywords:
-        if not description:
-            ensure_details(force=True)
+        ensure_details(force=True)
         for keyword in filters.description_keywords:
             if not _match_value(description, keyword):
                 return False
