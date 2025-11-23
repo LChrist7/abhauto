@@ -40,6 +40,23 @@ from bs4 import BeautifulSoup
 tzlocal.get_localzone = lambda: pytz.UTC  # type: ignore[assignment]
 apscheduler_util.get_localzone = lambda: pytz.UTC  # type: ignore[assignment]
 
+
+# APScheduler по умолчанию вызывает util.astimezone, которое в новых версиях
+# tzlocal может вернуть zoneinfo-таймзону. При попытке преобразования APScheduler
+# выбрасывает TypeError («Only timezones from the pytz library are supported»).
+# Оборачиваем astimezone так, чтобы в подобных случаях возвращался pytz.UTC.
+_original_astimezone = apscheduler_util.astimezone
+
+
+def _astimezone_compat(timezone):  # type: ignore[override]
+    try:
+        return _original_astimezone(timezone)
+    except TypeError:
+        return pytz.UTC
+
+
+apscheduler_util.astimezone = _astimezone_compat  # type: ignore[assignment]
+
 _telegram_spec = importlib.util.find_spec("telegram")
 _telegram_ext_spec = importlib.util.find_spec("telegram.ext")
 if _telegram_spec is None or _telegram_ext_spec is None:
