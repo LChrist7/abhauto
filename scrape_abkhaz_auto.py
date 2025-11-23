@@ -119,18 +119,44 @@ class FilterSettings:
         )
 
 
-def load_seen() -> set[str]:
+def _filter_signature(filters: FilterSettings) -> str:
+    """Возвращает стабильный ключ для набора фильтров (для кеша seen)."""
+
+    return json.dumps(
+        {
+            "brand": (filters.brand or "").strip().lower(),
+            "model": (filters.model or "").strip().lower(),
+            "max_mileage": filters.max_mileage,
+            "min_year": filters.min_year,
+            "max_price": filters.max_price,
+            "keywords": sorted(
+                [kw.strip().lower() for kw in filters.description_keywords if kw.strip()]
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def load_seen() -> dict[str, set[str]]:
+    """Загружает карту {signature: set(ids)} для разных наборов фильтров."""
+
     if SEEN_FILE.exists():
         try:
-            return set(json.loads(SEEN_FILE.read_text(encoding="utf-8")))
+            raw = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
+            # Поддержка старого формата (просто список ID без привязки к фильтрам)
+            if isinstance(raw, list):
+                return {}
+            if isinstance(raw, dict):
+                return {key: set(value) for key, value in raw.items() if isinstance(value, list)}
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.warning("Не удалось загрузить seen_listings.json: %s", exc)
-            return set()
-    return set()
+    return {}
 
 
-def save_seen(ids: Iterable[str]) -> None:
-    SEEN_FILE.write_text(json.dumps(list(ids), ensure_ascii=False, indent=2), encoding="utf-8")
+def save_seen(seen_map: dict[str, Iterable[str]]) -> None:
+    serializable = {key: list(ids) for key, ids in seen_map.items()}
+    SEEN_FILE.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -357,20 +383,23 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not message:
         return
     await message.reply_text("Начинаю поиск объявлений...")
-    seen = load_seen()
+    seen_map = load_seen()
+    signature = _filter_signature(settings)
+    seen_for_filter = set(seen_map.get(signature, set()))
     listings = fetch_listings()
     matches: list[dict] = []
     for card in listings:
-        if card["id"] in seen:
+        if card["id"] in seen_for_filter:
             continue
         try:
             if matches_filters(card, settings):
                 matches.append(card)
-                seen.add(card["id"])
+                seen_for_filter.add(card["id"])
         except Exception as exc:  # pragma: no cover - network parsing errors
             LOGGER.warning("Ошибка при обработке объявления %s: %s", card.get("url"), exc)
             continue
-    save_seen(seen)
+    seen_map[signature] = seen_for_filter
+    save_seen(seen_map)
     if not matches:
         await message.reply_text("Ничего не найдено по текущим фильтрам.")
         return
