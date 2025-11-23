@@ -33,6 +33,7 @@ import requests
 import tzlocal
 from apscheduler import util as apscheduler_util
 from bs4 import BeautifulSoup
+import re
 
 # Принудительно заставляем tzlocal и сам APScheduler возвращать pytz-таймзону до
 # инициализации JobQueue внутри Application.builder(), чтобы исключить ошибку
@@ -218,17 +219,64 @@ def fetch_listings() -> list[dict]:
     return listings
 
 
-def parse_detail_page(url: str) -> tuple[Optional[int], str]:
-    """Return (mileage, description) from the listing page."""
+def parse_detail_page(url: str) -> dict:
+    """Возвращает детали объявления, извлекая бренд, модель, год и пробег.
+
+    Страница может содержать данные как в блоках параметров, так и в тексте.
+    Функция ищет значения по подписи (Марка, Модель, Год, Пробег) и возвращает
+    словарь вида {brand, model, year, mileage, description}.
+    """
+
     LOGGER.info("Загрузка объявления %s", url)
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-    text = soup.get_text(" ", strip=True)
-    mileage = _extract_mileage(text)
-    description_el = soup.select_one(".description, .catalog__description, .advert__text")
-    description = description_el.get_text(" ", strip=True) if description_el else text
-    return mileage, description
+
+    def text_lines() -> list[str]:
+        raw_text = soup.get_text("\n", strip=True)
+        return [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+    def by_label(labels: list[str]) -> Optional[str]:
+        lines = text_lines()
+        for line in lines:
+            lower_line = line.lower()
+            for label in labels:
+                if lower_line.startswith(label):
+                    after = line[len(label):].strip(" -:\t")
+                    if ":" in line:
+                        after = line.split(":", 1)[1].strip()
+                    if after:
+                        return after
+        return None
+
+    description_el = soup.select_one(
+        ".description, .catalog__description, .advert__text, [itemprop='description']"
+    )
+    description = description_el.get_text(" ", strip=True) if description_el else ""
+
+    # Попытка достать поля из таблицы параметров (часто .advert__info или .params)
+    brand = by_label(["марка", "бренд"])
+    model = by_label(["модель"])
+    year_text = by_label(["год", "год выпуска", "выпуск"])
+    mileage_text = by_label(["пробег"])
+
+    text_content = " ".join(text_lines())
+    if not mileage_text:
+        mileage_text = _extract_mileage_raw(text_content)
+
+    year = int(re.search(r"\b(19|20)\d{2}\b", year_text).group(0)) if year_text and re.search(r"\b(19|20)\d{2}\b", year_text) else None
+    mileage = _parse_int(mileage_text)
+
+    if not description:
+        description = text_content
+
+    return {
+        "brand": brand,
+        "model": model,
+        "year": year,
+        "mileage": mileage,
+        "description": description,
+    }
 
 
 def _extract_mileage(text: str) -> Optional[int]:
@@ -242,6 +290,26 @@ def _extract_mileage(text: str) -> Optional[int]:
             if digits.isdigit():
                 return int(digits)
     return None
+
+
+def _extract_mileage_raw(text: str) -> Optional[str]:
+    lowered = text.lower()
+    for marker in ["пробег", "км", "km"]:
+        idx = lowered.find(marker)
+        if idx != -1:
+            start = max(0, idx - 20)
+            window = text[start:idx]
+            digits = "".join(ch for ch in window if ch.isdigit())
+            if digits:
+                return digits
+    return None
+
+
+def _parse_int(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return int(digits) if digits.isdigit() else None
 
 
 def _normalize_for_match(text: str) -> str:
@@ -313,16 +381,22 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     description = ""
     description_normalized = ""
     mileage: Optional[int] = None
+    detail_brand: Optional[str] = None
+    detail_model: Optional[str] = None
+    detail_year: Optional[int] = None
 
     def ensure_details() -> None:
-        nonlocal description, mileage, description_normalized
-        if description or mileage is not None:
+        nonlocal description, mileage, description_normalized, detail_brand, detail_model, detail_year
+        if description or mileage is not None or detail_brand is not None or detail_model is not None:
             return
         try:
-            mileage_val, description_text = parse_detail_page(card.get("url", ""))
-            mileage = mileage_val
-            description = description_text
-            description_normalized = _normalize_for_match(description_text)
+            details = parse_detail_page(card.get("url", ""))
+            mileage = details.get("mileage")
+            description = details.get("description") or ""
+            detail_brand = details.get("brand")
+            detail_model = details.get("model")
+            detail_year = details.get("year")
+            description_normalized = _normalize_for_match(description)
         except Exception as exc:  # pragma: no cover - сетевые ошибки
             LOGGER.warning(
                 "Не удалось загрузить детали объявления %s: %s",
@@ -336,23 +410,40 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     if filters.brand:
         brand_lower = filters.brand.lower()
         brand_normalized = _normalize_for_match(filters.brand)
-        if brand_lower not in title_lower and brand_normalized not in title_normalized:
-            ensure_details()
-            if brand_lower not in description.lower() and brand_normalized not in description_normalized:
-                return False
+        ensure_details()
+        detail_brand_text = (detail_brand or "")
+        if (
+            brand_lower not in title_lower
+            and brand_normalized not in title_normalized
+            and brand_lower not in detail_brand_text.lower()
+            and brand_normalized not in _normalize_for_match(detail_brand_text)
+            and brand_lower not in description.lower()
+            and brand_normalized not in description_normalized
+        ):
+            return False
 
     if filters.model:
         model_lower = filters.model.lower()
         model_normalized = _normalize_for_match(filters.model)
-        if model_lower not in title_lower and model_normalized not in title_normalized:
-            ensure_details()
-            if model_lower not in description.lower() and model_normalized not in description_normalized:
-                return False
+        ensure_details()
+        detail_model_text = (detail_model or "")
+        if (
+            model_lower not in title_lower
+            and model_normalized not in title_normalized
+            and model_lower not in detail_model_text.lower()
+            and model_normalized not in _normalize_for_match(detail_model_text)
+            and model_lower not in description.lower()
+            and model_normalized not in description_normalized
+        ):
+            return False
 
     if filters.max_price is not None and card.get("price") is not None and card["price"] > filters.max_price:
         return False
-    if filters.min_year is not None and card.get("year") is not None and card["year"] < filters.min_year:
-        return False
+    if filters.min_year is not None:
+        ensure_details()
+        effective_year = detail_year if detail_year is not None else card.get("year")
+        if effective_year is not None and effective_year < filters.min_year:
+            return False
 
     if filters.max_mileage is not None:
         ensure_details()
@@ -371,6 +462,12 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
 
     card["mileage"] = mileage
     card["description"] = description
+    if detail_brand:
+        card["brand"] = detail_brand
+    if detail_model:
+        card["model"] = detail_model
+    if detail_year is not None:
+        card["year"] = detail_year
     return True
 
 
