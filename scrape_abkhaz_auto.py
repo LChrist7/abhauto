@@ -308,10 +308,10 @@ def _parse_listing_item(item) -> Optional[dict]:
             if match:
                 digits = "".join(ch for ch in match.group(1) if ch.isdigit())
                 if digits:
-                    value = int(digits)
+                    value = _parse_int(digits, scale_small=True)
                     # Отбрасываем очевидные годы (до 2100) и слишком маленькие суммы
                     # — в каталоге машины стоят дороже ~10 000.
-                    if value >= 10_000 and value > 2100:
+                    if value is not None and value >= 10_000 and value > 2100:
                         candidates.append(value)
         if candidates:
             # Берём последнее подходящее число, чтобы игнорировать год/пробег в начале строки.
@@ -348,7 +348,7 @@ def _parse_listing_item(item) -> Optional[dict]:
     year = int(year_text[:4]) if year_text[:4].isdigit() else None
 
     mileage_text = _extract_mileage_raw(info_text or block_text)
-    mileage = _parse_int(mileage_text)
+    mileage = _parse_int(mileage_text, scale_small=True)
 
     description = description_el.get_text(" ", strip=True) if description_el else ""
     if not description:
@@ -442,7 +442,7 @@ def parse_detail_page(url: str) -> dict:
         # Иногда цена прописана словами «Цена: ...» рядом с описанием
         price_match = re.search(r"цена[:\s]*([\d\s]{3,})", soup.get_text(" ", strip=True), re.IGNORECASE)
         price_text = price_match.group(1) if price_match else ""
-    price = _parse_int(price_text) if price_text else None
+    price = _parse_int(price_text, scale_small=True) if price_text else None
     if price is not None and price < 10_000:
         price = None
 
@@ -471,7 +471,7 @@ def parse_detail_page(url: str) -> dict:
         mileage_text = _extract_mileage_raw(text_content)
 
     year = int(re.search(r"\b(19|20)\d{2}\b", year_text).group(0)) if year_text and re.search(r"\b(19|20)\d{2}\b", year_text) else None
-    mileage = _parse_int(mileage_text)
+    mileage = _parse_int(mileage_text, scale_small=True)
 
     if not description:
         description = text_content
@@ -498,7 +498,7 @@ def _extract_mileage(text: str) -> Optional[int]:
             window = text[start: idx]
             digits = "".join(ch for ch in window if ch.isdigit())
             if digits.isdigit():
-                return int(digits)
+                return _parse_int(digits, scale_small=True)
     return None
 
 
@@ -515,11 +515,23 @@ def _extract_mileage_raw(text: str) -> Optional[str]:
     return None
 
 
-def _parse_int(value: Optional[str]) -> Optional[int]:
+def _parse_int(value: Optional[str], *, scale_small: bool = False) -> Optional[int]:
+    """Парсит число из строки.
+
+    Если включён ``scale_small`` и количество цифр меньше 4, число умножается
+    на 1000 (для обработки компактных значений цены/пробега вроде "123").
+    """
+
     if not value:
         return None
     digits = "".join(ch for ch in str(value) if ch.isdigit())
-    return int(digits) if digits.isdigit() else None
+    if not digits.isdigit():
+        return None
+
+    number = int(digits)
+    if scale_small and len(digits) < 4:
+        number *= 1000
+    return number
 
 
 def _normalize_for_match(text: str) -> str:
