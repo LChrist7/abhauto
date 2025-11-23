@@ -247,8 +247,23 @@ def _parse_listing_item(item) -> Optional[dict]:
     title = title_el.get_text(strip=True)
 
     def parse_price(text: str) -> Optional[int]:
-        digits = "".join(ch for ch in text if ch.isdigit())
-        return int(digits) if digits else None
+        # Цена на странице обычно обёрнута в catalog__price. Если блок не найден,
+        # пробуем вытащить число рядом со словами «руб»/«₽» или «цена».
+        patterns = [
+            r"(?:цена[:\s]*)?([\d\s]{3,})(?=\s*(?:руб|₽|$))",
+            r"([\d\s]{3,})",
+        ]
+        candidates: list[int] = []
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                digits = "".join(ch for ch in match.group(1) if ch.isdigit())
+                if digits:
+                    candidates.append(int(digits))
+        if candidates:
+            # Берём последнее подходящее число, чтобы игнорировать год/пробег в начале строки.
+            return candidates[-1]
+        return None
 
     price_el = item.select_one(".catalog__price")
     year_el = item.select_one(".catalog__year")
@@ -256,8 +271,10 @@ def _parse_listing_item(item) -> Optional[dict]:
     info_text = " ".join(item.select_one("p").stripped_strings) if item.select_one("p") else ""
     block_text = " ".join(item.stripped_strings)
 
-    price_text = price_el.get_text(" ", strip=True) if price_el else info_text or block_text
-    price = parse_price(price_text)
+    price_source = price_el.get_text(" ", strip=True) if price_el else ""
+    if not price_source:
+        price_source = info_text or block_text
+    price = parse_price(price_source)
 
     year_text = year_el.get_text(strip=True) if year_el else ""
     if not year_text:
@@ -289,6 +306,7 @@ def _parse_listing_item(item) -> Optional[dict]:
 
 def fetch_listings() -> list[dict]:
     listings: list[dict] = []
+    seen_ids: set[str] = set()
     for page in range(1, PAGE_COUNT + 1):
         url = build_page_url(page)
         LOGGER.info("Загрузка страницы %s", url)
@@ -300,8 +318,9 @@ def fetch_listings() -> list[dict]:
         for selector in item_selectors:
             for item in soup.select(selector):
                 parsed = _parse_listing_item(item)
-                if parsed:
+                if parsed and parsed["id"] not in seen_ids:
                     listings.append(parsed)
+                    seen_ids.add(parsed["id"])
             if listings:
                 # Если уже нашли объявления по одному из селекторов, не продолжаем
                 # перебирать остальные (чтобы избежать дубликатов).
@@ -454,6 +473,18 @@ def _normalize_for_match(text: str) -> str:
     return " ".join("".join(normalized).split())
 
 
+def _match_value(candidate: Optional[str], needle: str) -> bool:
+    """Сравнивает значение с фильтром, нормализуя текст."""
+
+    if not candidate:
+        return False
+    candidate_norm = _normalize_for_match(candidate)
+    needle_norm = _normalize_for_match(needle)
+    if not candidate_norm or not needle_norm:
+        return False
+    return needle_norm in candidate_norm
+
+
 def matches_filters(card: dict, filters: FilterSettings) -> bool:
     """
     Проверяет объявление по заданным фильтрам.
@@ -472,15 +503,6 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     detail_year: Optional[int] = card.get("year")
     title_brand, title_model = _extract_brand_model_from_title(title)
     fetched_details = False
-
-    def _text_contains(text: str, needle: str) -> bool:
-        if not text or not needle:
-            return False
-        lower = text.lower()
-        normalized = _normalize_for_match(text)
-        needle_lower = needle.lower()
-        needle_normalized = _normalize_for_match(needle)
-        return needle_lower in lower or needle_normalized in normalized
 
     def ensure_details(force: bool = False) -> None:
         nonlocal description, mileage, detail_brand, detail_model, detail_year, fetched_details
@@ -507,24 +529,20 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
 
     if filters.brand:
         ensure_details()
-        brand_candidates = [card.get("brand"), title_brand, detail_brand, description, title]
-        if not any(_text_contains(candidate, filters.brand) for candidate in brand_candidates if candidate):
+        brand_candidates = [card.get("brand"), title_brand, detail_brand]
+        if not any(_match_value(candidate, filters.brand) for candidate in brand_candidates):
             ensure_details(force=True)
-            brand_candidates = [card.get("brand"), title_brand, detail_brand, description, title]
-            if not any(
-                _text_contains(candidate, filters.brand) for candidate in brand_candidates if candidate
-            ):
+            brand_candidates = [card.get("brand"), title_brand, detail_brand]
+            if not any(_match_value(candidate, filters.brand) for candidate in brand_candidates):
                 return False
 
     if filters.model:
         ensure_details()
-        model_candidates = [card.get("model"), title_model, detail_model, description, title]
-        if not any(_text_contains(candidate, filters.model) for candidate in model_candidates if candidate):
+        model_candidates = [card.get("model"), title_model, detail_model]
+        if not any(_match_value(candidate, filters.model) for candidate in model_candidates):
             ensure_details(force=True)
-            model_candidates = [card.get("model"), title_model, detail_model, description, title]
-            if not any(
-                _text_contains(candidate, filters.model) for candidate in model_candidates if candidate
-            ):
+            model_candidates = [card.get("model"), title_model, detail_model]
+            if not any(_match_value(candidate, filters.model) for candidate in model_candidates):
                 return False
 
     if filters.max_price is not None and card.get("price") is not None and card["price"] > filters.max_price:
@@ -547,7 +565,7 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
         if not description:
             ensure_details(force=True)
         for keyword in filters.description_keywords:
-            if not _text_contains(description, keyword):
+            if not _match_value(description, keyword):
                 return False
 
     card["mileage"] = mileage
