@@ -127,11 +127,11 @@ async def _safe_reply_text(message, text: str, **kwargs):
     if not message:
         return None
     try:
-        return await message.reply_text(text, timeout=30, **kwargs)
+        return await message.reply_text(text, **kwargs)
     except TimedOut:
         LOGGER.warning("Таймаут при отправке сообщения, повторяем с более высоким таймаутом")
         try:
-            return await message.reply_text(text, timeout=60, **kwargs)
+            return await message.reply_text(text, **kwargs)
         except TimedOut:
             LOGGER.error("Не удалось отправить сообщение из-за тайм-аута Telegram")
             return None
