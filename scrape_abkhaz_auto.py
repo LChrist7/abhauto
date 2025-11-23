@@ -75,6 +75,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.error import TimedOut
 
 
 # Base configuration
@@ -118,6 +119,33 @@ class FilterSettings:
                 f"Ключевые слова в описании: {', '.join(self.description_keywords) if self.description_keywords else 'не задано'}",
             ]
         )
+
+
+async def _safe_reply_text(message, text: str, **kwargs):
+    """Отправляет сообщение с повторной попыткой при тайм-ауте."""
+
+    if not message:
+        return None
+    try:
+        return await message.reply_text(text, timeout=30, **kwargs)
+    except TimedOut:
+        LOGGER.warning("Таймаут при отправке сообщения, повторяем с более высоким таймаутом")
+        try:
+            return await message.reply_text(text, timeout=60, **kwargs)
+        except TimedOut:
+            LOGGER.error("Не удалось отправить сообщение из-за тайм-аута Telegram")
+            return None
+    except Exception as exc:  # pragma: no cover - сетевые сбои
+        LOGGER.error("Ошибка при отправке сообщения: %s", exc)
+        return None
+
+
+async def _reply_in_chunks(message, lines: list[str], chunk_size: int = 8) -> None:
+    """Делит длинный ответ на части, чтобы снизить риск тайм-аутов."""
+
+    for start in range(0, len(lines), chunk_size):
+        chunk = lines[start : start + chunk_size]
+        await _safe_reply_text(message, "\n\n".join(chunk))
 
 
 def _filter_signature(filters: FilterSettings) -> str:
@@ -570,7 +598,8 @@ def parse_filter_args(args: list[str]) -> FilterSettings:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.setdefault("filters", FilterSettings())
-    await update.message.reply_text(
+    await _safe_reply_text(
+        update.message,
         "Привет! Я буду искать объявления на abkhaz-auto.ru.\n"
         "Можешь воспользоваться кнопками ниже для настройки фильтров или командой /filters.\n"
         "После выбора фильтров нажми «Запустить поиск».",
@@ -583,8 +612,8 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.setdefault("filters", FilterSettings())
     message = update.effective_message
     if message:
-        await message.reply_text(
-            "Выберите, что настроить:", reply_markup=main_menu_keyboard()
+        await _safe_reply_text(
+            message, "Выберите, что настроить:", reply_markup=main_menu_keyboard()
         )
     return CHOOSING
 
@@ -592,16 +621,14 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def set_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = parse_filter_args(context.args)
     context.user_data["filters"] = settings
-    await update.message.reply_text(
-        "Фильтры обновлены:\n" + settings.describe()
-    )
+    await _safe_reply_text(update.message, "Фильтры обновлены:\n" + settings.describe())
 
 
 async def show_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: FilterSettings = context.user_data.get("filters") or FilterSettings()
     message = update.effective_message
     if message:
-        await message.reply_text("Текущие фильтры:\n" + settings.describe())
+        await _safe_reply_text(message, "Текущие фильтры:\n" + settings.describe())
 
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -609,7 +636,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message:
         return
-    await message.reply_text("Начинаю поиск объявлений...")
+    await _safe_reply_text(message, "Начинаю поиск объявлений...")
     seen_map = load_seen()
     signature = _filter_signature(settings)
     seen_for_filter = set(seen_map.get(signature, set()))
@@ -628,7 +655,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     seen_map[signature] = seen_for_filter
     save_seen(seen_map)
     if not matches:
-        await message.reply_text("Ничего не найдено по текущим фильтрам.")
+        await _safe_reply_text(message, "Ничего не найдено по текущим фильтрам.")
         return
     reply_lines = [f"Найдено {len(matches)} объявлений:"]
     for card in matches:
@@ -637,7 +664,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             line += f", пробег: {card['mileage']} км"
         line += f"\n{card['url']}"
         reply_lines.append(line)
-    await message.reply_text("\n\n".join(reply_lines))
+    await _reply_in_chunks(message, reply_lines)
 
 
 def _ensure_filter_storage(context: ContextTypes.DEFAULT_TYPE) -> FilterSettings:
@@ -665,12 +692,13 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if action in prompts:
         context.user_data["pending_field"] = action
-        await query.message.reply_text(prompts[action])
+        await _safe_reply_text(query.message, prompts[action])
         return TYPING_VALUE
 
     if action == "show_filters":
         await show_filters(update, context)
-        await query.message.reply_text(
+        await _safe_reply_text(
+            query.message,
             "Можешь продолжить настройку или запустить поиск:",
             reply_markup=main_menu_keyboard(),
         )
@@ -678,14 +706,16 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if action == "run_search":
         await search(update, context)
-        await query.message.reply_text(
+        await _safe_reply_text(
+            query.message,
             "Продолжить настройку фильтров?",
             reply_markup=main_menu_keyboard(),
         )
         return CHOOSING
 
     # Неизвестное действие — показать меню
-    await query.message.reply_text(
+    await _safe_reply_text(
+        query.message,
         "Неизвестная команда. Выберите действие на клавиатуре:",
         reply_markup=main_menu_keyboard(),
     )
@@ -698,7 +728,8 @@ async def handle_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     text = (update.message.text or "").strip()
 
     if not pending_field:
-        await update.message.reply_text(
+        await _safe_reply_text(
+            update.message,
             "Не удалось определить, что вы хотите изменить. Выберите действие на клавиатуре:",
             reply_markup=main_menu_keyboard(),
         )
@@ -730,11 +761,22 @@ async def handle_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         reply = "Неизвестный фильтр"
 
     context.user_data.pop("pending_field", None)
-    await update.message.reply_text(reply)
-    await update.message.reply_text(
-        "Далее?", reply_markup=main_menu_keyboard()
+    await _safe_reply_text(update.message, reply)
+    await _safe_reply_text(
+        update.message, "Далее?", reply_markup=main_menu_keyboard()
     )
     return CHOOSING
+
+
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Логирует исключения и информирует пользователя при сбое отправки."""
+
+    LOGGER.error("Ошибка при обработке обновления", exc_info=context.error)
+    if hasattr(update, "effective_message") and update.effective_message:
+        await _safe_reply_text(
+            update.effective_message,
+            "Произошла ошибка при обращении к Telegram. Попробуйте ещё раз.",
+        )
 
 
 def run_bot() -> None:
@@ -767,6 +809,7 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("filters", set_filters))
     application.add_handler(CommandHandler("search", search))
     application.add_handler(CommandHandler("showfilters", show_filters))
+    application.add_error_handler(handle_error)
 
     LOGGER.info("Бот запущен. Ожидание команд...")
     application.run_polling()
