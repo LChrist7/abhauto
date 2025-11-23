@@ -31,11 +31,14 @@ from typing import Iterable, List, Optional
 import pytz
 import requests
 import tzlocal
+from apscheduler import util as apscheduler_util
 from bs4 import BeautifulSoup
 
-# Принудительно заставляем tzlocal возвращать pytz-таймзону до инициализации
-# JobQueue внутри Application.builder(), чтобы APScheduler не падал на zoneinfo.
+# Принудительно заставляем tzlocal и сам APScheduler возвращать pytz-таймзону до
+# инициализации JobQueue внутри Application.builder(), чтобы исключить ошибку
+# «Only timezones from the pytz library are supported».
 tzlocal.get_localzone = lambda: pytz.UTC  # type: ignore[assignment]
+apscheduler_util.get_localzone = lambda: pytz.UTC  # type: ignore[assignment]
 
 _telegram_spec = importlib.util.find_spec("telegram")
 _telegram_ext_spec = importlib.util.find_spec("telegram.ext")
