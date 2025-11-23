@@ -244,6 +244,58 @@ def _extract_mileage(text: str) -> Optional[int]:
     return None
 
 
+def _normalize_for_match(text: str) -> str:
+    """Упрощённая нормализация для поиска по латинице/кириллице.
+
+    Переводит кириллицу в приближенную латиницу, убирает лишние
+    символы и приводит к нижнему регистру, чтобы запрос "Toyota"
+    совпадал с "Тойота" в заголовках и описаниях.
+    """
+
+    translit = {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ё": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "y",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "h",
+        "ц": "c",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "sch",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+    }
+
+    normalized = []
+    for ch in text.lower():
+        mapped = translit.get(ch, ch)
+        if mapped.isalnum() or mapped.isspace():
+            normalized.append(mapped)
+    return " ".join("".join(normalized).split())
+
+
 def matches_filters(card: dict, filters: FilterSettings) -> bool:
     """
     Проверяет объявление по заданным фильтрам.
@@ -256,18 +308,21 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
 
     title = card.get("title", "")
     title_lower = title.lower()
+    title_normalized = _normalize_for_match(title)
 
     description = ""
+    description_normalized = ""
     mileage: Optional[int] = None
 
     def ensure_details() -> None:
-        nonlocal description, mileage
+        nonlocal description, mileage, description_normalized
         if description or mileage is not None:
             return
         try:
             mileage_val, description_text = parse_detail_page(card.get("url", ""))
             mileage = mileage_val
             description = description_text
+            description_normalized = _normalize_for_match(description_text)
         except Exception as exc:  # pragma: no cover - сетевые ошибки
             LOGGER.warning(
                 "Не удалось загрузить детали объявления %s: %s",
@@ -275,20 +330,23 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
                 exc,
             )
             description = ""
+            description_normalized = ""
             mileage = None
 
     if filters.brand:
         brand_lower = filters.brand.lower()
-        if brand_lower not in title_lower:
+        brand_normalized = _normalize_for_match(filters.brand)
+        if brand_lower not in title_lower and brand_normalized not in title_normalized:
             ensure_details()
-            if brand_lower not in description.lower():
+            if brand_lower not in description.lower() and brand_normalized not in description_normalized:
                 return False
 
     if filters.model:
         model_lower = filters.model.lower()
-        if model_lower not in title_lower:
+        model_normalized = _normalize_for_match(filters.model)
+        if model_lower not in title_lower and model_normalized not in title_normalized:
             ensure_details()
-            if model_lower not in description.lower():
+            if model_lower not in description.lower() and model_normalized not in description_normalized:
                 return False
 
     if filters.max_price is not None and card.get("price") is not None and card["price"] > filters.max_price:
@@ -304,8 +362,12 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     if filters.description_keywords:
         ensure_details()
         desc_lower = description.lower()
-        if not all(keyword.lower() in desc_lower for keyword in filters.description_keywords):
-            return False
+        desc_normalized = description_normalized or _normalize_for_match(description)
+        for keyword in filters.description_keywords:
+            keyword_lower = keyword.lower()
+            keyword_norm = _normalize_for_match(keyword)
+            if keyword_lower not in desc_lower and keyword_norm not in desc_normalized:
+                return False
 
     card["mileage"] = mileage
     card["description"] = description
