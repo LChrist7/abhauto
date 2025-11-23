@@ -24,7 +24,7 @@ import asyncio
 import importlib.util
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -106,6 +106,7 @@ class FilterSettings:
     min_mileage: Optional[int] = None
     max_mileage: Optional[int] = None
     min_year: Optional[int] = None
+    max_year: Optional[int] = None
     min_price: Optional[int] = None
     max_price: Optional[int] = None
     min_volume: Optional[float] = None
@@ -119,13 +120,21 @@ class FilterSettings:
                 f"Марка: {self.brand or 'не задано'}",
                 f"Модель: {self.model or 'не задано'}",
                 f"Пробег: {self.min_mileage or '-'} — {self.max_mileage or '-'}",
-                f"Минимальный год: {self.min_year or 'не задано'}",
+                f"Год выпуска: {self.min_year or '-'} — {self.max_year or '-'}",
                 f"Цена: {self.min_price or '-'} — {self.max_price or '-'}",
                 f"Объём двигателя: {self.min_volume or '-'} — {self.max_volume or '-'}",
                 f"Ключевые слова в описании: {', '.join(self.description_keywords) if self.description_keywords else 'не задано'}",
                 f"Страниц для поиска: {self.page_count}",
             ]
         )
+
+
+def _clone_filters(settings: FilterSettings) -> FilterSettings:
+    """Создаёт копию настроек, чтобы подписка не зависела от будущих правок."""
+
+    data = asdict(settings)
+    data["description_keywords"] = list(data.get("description_keywords", []))
+    return FilterSettings(**data)
 
 
 def _ensure_absolute_url(url: Optional[str]) -> Optional[str]:
@@ -180,6 +189,44 @@ async def _safe_reply_photo(message, photo_url: str, caption: str) -> None:
         return
 
 
+async def _safe_send_text(bot, chat_id: int, text: str) -> None:
+    """Отправляет сообщение в чат, делая повторную попытку при тайм-ауте."""
+
+    try:
+        await bot.send_message(chat_id=chat_id, text=text)
+        return
+    except TimedOut:
+        LOGGER.warning("Таймаут при отправке сообщения, повторяем")
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+            return
+        except TimedOut:
+            LOGGER.error("Не удалось отправить сообщение из-за тайм-аута Telegram")
+            return
+    except Exception as exc:  # pragma: no cover - сетевые сбои
+        LOGGER.error("Ошибка при отправке сообщения в чат %s: %s", chat_id, exc)
+        return
+
+
+async def _safe_send_photo(bot, chat_id: int, photo_url: str, caption: str) -> None:
+    """Отправляет фото в чат, повторяя попытку при тайм-ауте."""
+
+    try:
+        await bot.send_photo(chat_id=chat_id, photo=photo_url, caption=caption)
+        return
+    except TimedOut:
+        LOGGER.warning("Таймаут при отправке фото, повторяем")
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=photo_url, caption=caption)
+            return
+        except TimedOut:
+            LOGGER.error("Не удалось отправить фото из-за тайм-аута Telegram")
+            return
+    except Exception as exc:  # pragma: no cover - сетевые сбои
+        LOGGER.error("Ошибка при отправке фото в чат %s: %s", chat_id, exc)
+        return
+
+
 async def _reply_in_chunks(message, lines: list[str], chunk_size: int = 8) -> None:
     """Делит длинный ответ на части, чтобы снизить риск тайм-аутов."""
 
@@ -198,6 +245,7 @@ def _filter_signature(filters: FilterSettings) -> str:
             "min_mileage": filters.min_mileage,
             "max_mileage": filters.max_mileage,
             "min_year": filters.min_year,
+            "max_year": filters.max_year,
             "min_price": filters.min_price,
             "max_price": filters.max_price,
             "min_volume": filters.min_volume,
@@ -233,6 +281,14 @@ def save_seen(seen_map: dict[str, Iterable[str]]) -> None:
     SEEN_FILE.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _get_seen_map(application) -> dict[str, set[str]]:
+    seen_map = application.bot_data.get("seen_map")
+    if seen_map is None:
+        seen_map = load_seen()
+        application.bot_data["seen_map"] = seen_map
+    return seen_map
+
+
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -242,7 +298,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("Пробег", callback_data="set_mileage"),
-                InlineKeyboardButton("Мин. год", callback_data="set_year"),
+                InlineKeyboardButton("Год", callback_data="set_year"),
             ],
             [
                 InlineKeyboardButton("Цена", callback_data="set_price"),
@@ -252,6 +308,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("Страницы поиска", callback_data="set_pages")],
             [InlineKeyboardButton("Показать фильтры", callback_data="show_filters")],
             [InlineKeyboardButton("Запустить поиск", callback_data="run_search")],
+            [InlineKeyboardButton("Подписаться", callback_data="subscribe")],
         ]
     )
 
@@ -789,13 +846,16 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
                 return False
             if filters.max_price is not None and price_value > filters.max_price:
                 return False
-    if filters.min_year is not None:
+    if filters.min_year is not None or filters.max_year is not None:
         effective_year = detail_year if detail_year is not None else card.get("year")
         if effective_year is None:
             ensure_details(force=True)
             effective_year = detail_year if detail_year is not None else card.get("year")
-        if effective_year is not None and effective_year < filters.min_year:
-            return False
+        if effective_year is not None:
+            if filters.min_year is not None and effective_year < filters.min_year:
+                return False
+            if filters.max_year is not None and effective_year > filters.max_year:
+                return False
 
     if filters.min_mileage is not None or filters.max_mileage is not None:
         if mileage is None:
@@ -857,9 +917,12 @@ def parse_filter_args(args: list[str]) -> FilterSettings:
                 settings.min_mileage = min_m
             if max_m is not None:
                 settings.max_mileage = max_m
-        elif key == "min_year":
-            if value.isdigit():
-                settings.min_year = int(value)
+        elif key in {"year", "years", "min_year", "max_year"}:
+            min_y, max_y = _parse_range_int(value)
+            if min_y is not None:
+                settings.min_year = min_y
+            if max_y is not None:
+                settings.max_year = max_y
         elif key in {"price", "max_price", "min_price"}:
             min_p, max_p = _parse_range_int(value, scale_small=True)
             if min_p is not None:
@@ -915,6 +978,43 @@ async def show_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _safe_reply_text(message, "Текущие фильтры:\n" + settings.describe())
 
 
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Оформляет подписку на новые объявления по текущим фильтрам."""
+
+    settings = _ensure_filter_storage(context)
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or not message:
+        return CHOOSING
+
+    filters_copy = _clone_filters(settings)
+    signature = f"{chat.id}:{_filter_signature(filters_copy)}"
+    job_queue = context.application.job_queue
+    job_name = f"subscription_{chat.id}"
+
+    # Снимаем прошлую подписку, если была, чтобы обновить фильтры.
+    for job in job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+
+    job_queue.run_repeating(
+        poll_new_listings,
+        interval=120,
+        first=0,
+        name=job_name,
+        data={"chat_id": chat.id, "filters": filters_copy, "signature": signature},
+    )
+
+    seen_map = _get_seen_map(context.application)
+    seen_map.setdefault(signature, set())
+    save_seen(seen_map)
+
+    await _safe_reply_text(
+        message,
+        "Подписка активирована. Каждые 2 минуты буду присылать новые подходящие объявления.",
+    )
+    return CHOOSING
+
+
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: FilterSettings = context.user_data.get("filters") or FilterSettings()
     message = update.effective_message
@@ -967,6 +1067,54 @@ def _format_listing(card: dict) -> str:
     return "\n\n".join([p for p in parts if p])
 
 
+async def poll_new_listings(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Периодически опрашивает сайт и присылает новые объявления подписчикам."""
+
+    if not context.job:
+        return
+
+    data = context.job.data or {}
+    filters: Optional[FilterSettings] = data.get("filters")
+    chat_id: Optional[int] = data.get("chat_id")
+    signature: Optional[str] = data.get("signature")
+    if not filters or chat_id is None:
+        return
+
+    signature = signature or f"{chat_id}:{_filter_signature(filters)}"
+    seen_map = _get_seen_map(context.application)
+    seen_ids = seen_map.setdefault(signature, set())
+
+    listings = fetch_listings(filters.page_count)
+    new_cards: list[dict] = []
+    for card in listings:
+        try:
+            if not matches_filters(card, filters):
+                continue
+        except Exception as exc:  # pragma: no cover - сетевые ошибки
+            LOGGER.warning("Ошибка при проверке объявления %s: %s", card.get("url"), exc)
+            continue
+
+        listing_id = str(card.get("id") or card.get("url") or card.get("title") or "")
+        if not listing_id or listing_id in seen_ids:
+            continue
+        new_cards.append(card)
+
+    if not new_cards:
+        return
+
+    bot = context.application.bot
+    for card in new_cards:
+        caption = _format_listing(card)
+        photo_url = card.get("image_url")
+        if photo_url:
+            await _safe_send_photo(bot, chat_id, photo_url, caption)
+        else:
+            await _safe_send_text(bot, chat_id, caption)
+        seen_ids.add(str(card.get("id") or card.get("url") or card.get("title") or ""))
+
+    save_seen(seen_map)
+
+
 async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query:
@@ -979,7 +1127,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "set_brand": "Введите марку (например, Toyota):",
         "set_model": "Введите модель (например, Camry):",
         "set_mileage": "Введите диапазон пробега, например 10000-165000:",
-        "set_year": "Введите минимальный год выпуска (например, 2010):",
+        "set_year": "Введите диапазон годов, например 2001-2010:",
         "set_price": "Введите диапазон цены, например 400000-1500000:",
         "set_volume": "Введите диапазон объёма двигателя, например 1.8-4.7:",
         "set_keywords": "Введите ключевые слова через запятую (например, левый руль, газ):",
@@ -1005,6 +1153,15 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _safe_reply_text(
             query.message,
             "Продолжить настройку фильтров?",
+            reply_markup=main_menu_keyboard(),
+        )
+        return CHOOSING
+
+    if action == "subscribe":
+        await subscribe(update, context)
+        await _safe_reply_text(
+            query.message,
+            "Подписка сохранена. Что-нибудь ещё настроить?",
             reply_markup=main_menu_keyboard(),
         )
         return CHOOSING
@@ -1042,8 +1199,9 @@ async def handle_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         settings.min_mileage, settings.max_mileage = min_m, max_m
         reply = f"Пробег: {settings.min_mileage or '-'} — {settings.max_mileage or '-'}"
     elif pending_field == "set_year":
-        settings.min_year = int(text) if text.isdigit() else None
-        reply = f"Минимальный год: {settings.min_year or 'не задано'}"
+        min_y, max_y = _parse_range_int(text)
+        settings.min_year, settings.max_year = min_y, max_y
+        reply = f"Год выпуска: {settings.min_year or '-'} — {settings.max_year or '-'}"
     elif pending_field == "set_price":
         min_p, max_p = _parse_range_int(text, scale_small=True)
         settings.min_price, settings.max_price = min_p, max_p
@@ -1098,6 +1256,7 @@ def run_bot() -> None:
         asyncio.set_event_loop(loop)
 
     application = Application.builder().token(token).build()
+    application.bot_data["seen_map"] = load_seen()
 
     conversation = ConversationHandler(
         entry_points=[CommandHandler("start", start), CommandHandler("menu", show_menu)],
@@ -1114,6 +1273,7 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("filters", set_filters))
     application.add_handler(CommandHandler("search", search))
     application.add_handler(CommandHandler("showfilters", show_filters))
+    application.add_handler(CommandHandler("subscribe", subscribe))
     application.add_error_handler(handle_error)
 
     LOGGER.info("Бот запущен. Ожидание команд...")
