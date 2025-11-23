@@ -522,7 +522,7 @@ def matches_filters(card: dict, filters: FilterSettings) -> bool:
     fetched_details = False
 
     def ensure_details(force: bool = False) -> None:
-        nonlocal description, mileage, detail_brand, detail_model, detail_year, fetched_details
+        nonlocal description, mileage, detail_brand, detail_model, detail_year, detail_brand_norm, detail_model_norm, fetched_details
         if fetched_details:
             return
         already_have_core = description or mileage is not None or detail_brand is not None or detail_model is not None or detail_year is not None
