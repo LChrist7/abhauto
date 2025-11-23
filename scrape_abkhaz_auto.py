@@ -3,8 +3,8 @@
 Telegram bot for scraping abkhaz-auto.ru listings.
 
 The bot responds to commands to configure filters (brand, model, mileage,
-year, price, and keywords contained in the listing description) and returns
-matches from the first four pages of the configured category.
+    year, price, and keywords contained in the listing description) and returns
+    matches from the configured number of pages in the category.
 
 Environment variable (optional):
     TELEGRAM_BOT_TOKEN - Token obtained from @BotFather. If not provided,
@@ -81,7 +81,7 @@ from telegram.error import TimedOut
 # Base configuration
 CATEGORY_URL = "https://abkhaz-auto.ru/category/188"
 SEEN_FILE = Path("seen_listings.json")
-PAGE_COUNT = 4  # base page + next 3 pages
+DEFAULT_PAGE_COUNT = 4  # base page + next 3 pages
 DEFAULT_BOT_TOKEN = "8277337729:AAHgG2z4cet7VGJJlXnn57kbpoXapkj7Mw0"
 
 # Conversation states
@@ -107,6 +107,7 @@ class FilterSettings:
     min_year: Optional[int] = None
     max_price: Optional[int] = None
     description_keywords: List[str] = field(default_factory=list)
+    page_count: int = DEFAULT_PAGE_COUNT
 
     def describe(self) -> str:
         return "\n".join(
@@ -117,6 +118,7 @@ class FilterSettings:
                 f"Минимальный год: {self.min_year or 'не задано'}",
                 f"Максимальная цена: {self.max_price or 'не задано'}",
                 f"Ключевые слова в описании: {', '.join(self.description_keywords) if self.description_keywords else 'не задано'}",
+                f"Страниц для поиска: {self.page_count}",
             ]
         )
 
@@ -153,14 +155,15 @@ def _filter_signature(filters: FilterSettings) -> str:
 
     return json.dumps(
         {
-            "brand": (filters.brand or "").strip().lower(),
-            "model": (filters.model or "").strip().lower(),
+            "brand": _normalize_for_match(filters.brand or ""),
+            "model": _normalize_for_match(filters.model or ""),
             "max_mileage": filters.max_mileage,
             "min_year": filters.min_year,
             "max_price": filters.max_price,
             "keywords": sorted(
-                [kw.strip().lower() for kw in filters.description_keywords if kw.strip()]
+                [_normalize_for_match(kw) for kw in filters.description_keywords if kw.strip()]
             ),
+            "page_count": filters.page_count,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -203,6 +206,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Макс. цена", callback_data="set_price"),
                 InlineKeyboardButton("Ключевые слова", callback_data="set_keywords"),
             ],
+            [InlineKeyboardButton("Страницы поиска", callback_data="set_pages")],
             [InlineKeyboardButton("Показать фильтры", callback_data="show_filters")],
             [InlineKeyboardButton("Запустить поиск", callback_data="run_search")],
         ]
@@ -318,10 +322,11 @@ def _parse_listing_item(item) -> Optional[dict]:
     }
 
 
-def fetch_listings() -> list[dict]:
+def fetch_listings(page_count: int = DEFAULT_PAGE_COUNT) -> list[dict]:
     listings: list[dict] = []
     seen_ids: set[str] = set()
-    for page in range(1, PAGE_COUNT + 1):
+    effective_pages = page_count if page_count > 0 else DEFAULT_PAGE_COUNT
+    for page in range(1, effective_pages + 1):
         url = build_page_url(page)
         LOGGER.info("Загрузка страницы %s", url)
         resp = requests.get(url, timeout=20)
@@ -654,6 +659,9 @@ def parse_filter_args(args: list[str]) -> FilterSettings:
                 settings.max_price = int(digits)
         elif key == "keywords":
             settings.description_keywords = [word.strip() for word in value.split(",") if word.strip()]
+        elif key in {"pages", "page_count"}:
+            if value.isdigit():
+                settings.page_count = max(1, int(value))
     return settings
 
 
@@ -663,7 +671,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         update.message,
         "Привет! Я буду искать объявления на abkhaz-auto.ru.\n"
         "Можешь воспользоваться кнопками ниже для настройки фильтров или командой /filters.\n"
-        "После выбора фильтров нажми «Запустить поиск».",
+        "После выбора фильтров нажми «Запустить поиск». Можно указать, сколько страниц смотреть.",
         reply_markup=main_menu_keyboard(),
     )
     return CHOOSING
@@ -701,7 +709,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     seen_map = load_seen()
     signature = _filter_signature(settings)
     seen_for_filter = set(seen_map.get(signature, set()))
-    listings = fetch_listings()
+    listings = fetch_listings(settings.page_count)
     matches: list[dict] = []
     for card in listings:
         if card["id"] in seen_for_filter:
@@ -749,6 +757,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "set_year": "Введите минимальный год выпуска (например, 2010):",
         "set_price": "Введите максимальную цену (число):",
         "set_keywords": "Введите ключевые слова через запятую (например, левый руль, газ):",
+        "set_pages": "Введите количество страниц для поиска (например, 3):",
     }
 
     if action in prompts:
@@ -818,6 +827,10 @@ async def handle_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             "Ключевые слова: "
             + (", ".join(settings.description_keywords) if settings.description_keywords else "не задано")
         )
+    elif pending_field == "set_pages":
+        digits = "".join(ch for ch in text if ch.isdigit())
+        settings.page_count = max(1, int(digits)) if digits else settings.page_count
+        reply = f"Страниц для поиска: {settings.page_count}"
     else:
         reply = "Неизвестный фильтр"
 
