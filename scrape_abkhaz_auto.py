@@ -1011,6 +1011,23 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     for job in job_queue.get_jobs_by_name(job_name):
         job.schedule_removal()
 
+    seen_map = _get_seen_map(context.application)
+    # Перед запуском подписки отметим все текущие подходящие объявления, чтобы получать
+    # только новые после момента включения подписки.
+    current_seen = seen_map.setdefault(signature, set())
+    for card in fetch_listings(filters_copy.page_count):
+        try:
+            if not matches_filters(card, filters_copy):
+                continue
+        except Exception as exc:  # pragma: no cover - сетевые ошибки
+            LOGGER.warning("Ошибка при первичном просмотре объявления %s: %s", card.get("url"), exc)
+            continue
+        listing_id = str(card.get("id") or card.get("url") or card.get("title") or "")
+        if listing_id:
+            current_seen.add(listing_id)
+
+    save_seen(seen_map)
+
     job_queue.run_repeating(
         poll_new_listings,
         interval=120,
@@ -1018,10 +1035,6 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         name=job_name,
         data={"chat_id": chat.id, "filters": filters_copy, "signature": signature},
     )
-
-    seen_map = _get_seen_map(context.application)
-    seen_map.setdefault(signature, set())
-    save_seen(seen_map)
 
     await _safe_reply_text(
         message,
