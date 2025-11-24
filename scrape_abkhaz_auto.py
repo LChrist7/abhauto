@@ -1109,11 +1109,18 @@ def _format_listing(card: dict) -> str:
     price = card.get("price") or "—"
     mileage = card.get("mileage")
     description = card.get("description") or ""
+    volume = card.get("volume")
+    if isinstance(volume, (int, float)):
+        volume_str = str(volume).rstrip("0").rstrip(".")
+    else:
+        volume_str = volume
     details_lines = [f"Год: {year}", f"Цена: {price}"]
     if mileage is not None:
         details_lines.append(f"Пробег: {mileage} км")
+    if volume_str:
+        details_lines.append(f"Объём: {volume_str} л")
     if description:
-        details_lines.append(description[:400])
+        details_lines.append(description)
     parts.insert(1, "\n".join(details_lines))
     return "\n\n".join([p for p in parts if p])
 
